@@ -67,3 +67,11 @@ node_modules/
 
 # dataconnect generated files
 .dataconnect
+
+# Sensitive files
+serviceAccountKey.json
+stop_times.txt
+
+# General secrets
+*.key
+*.pem
