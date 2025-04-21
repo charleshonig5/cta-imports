@@ -172,18 +172,40 @@ async function updateRecentSelections(userId, rideSnap) {
 
   for (const field of fields) {
     const value = rideSnap.get(field);
-    if (!value) continue;
+    const type = rideSnap.get('type');
+    const line = rideSnap.get('line');
+
+    if (!value || !type) continue;
+
+    const docId = `${type}_${line || 'none'}_${field}`;
 
     const ref = db
       .collection('users')
       .doc(userId)
-      .collection('recentSelections')
-      .doc(field);
+      .collection('recentSearches')
+      .doc(docId);
 
     const doc = await ref.get();
     const current = doc.exists ? doc.data().items || [] : [];
 
     const updated = [value, ...current.filter((v) => v !== value)].slice(0, 5);
+
+    await ref.set({ items: updated });
+  }
+
+  // Fallback population: most-used stops (just starting here with startStop)
+  const startStop = rideSnap.get('startStop');
+  if (startStop) {
+    const ref = db
+      .collection('users')
+      .doc(userId)
+      .collection('fallbackSearches')
+      .doc('startStop');
+
+    const doc = await ref.get();
+    const current = doc.exists ? doc.data().items || [] : [];
+
+    const updated = [startStop, ...current.filter((v) => v !== startStop)].slice(0, 5);
 
     await ref.set({ items: updated });
   }
