@@ -1,7 +1,7 @@
 const functions = require('firebase-functions/v2');
 const admin = require('firebase-admin');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onDocumentWritten } = require('firebase-functions/v2/firestore');
+const { onDocumentWritten, onDocumentDeleted } = require('firebase-functions/v2/firestore');
 const { onCall } = require("firebase-functions/v2/https");
 const { FieldValue } = require('firebase-admin/firestore');
 
@@ -123,6 +123,42 @@ exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
   console.log(`✅ Stats updated in real-time for user: ${userId}`);
 });
 
+// ---------------- RIDE DELETE CLEANUP ---------------- //
+
+exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
+  const deletedRide = event.data?.data();
+  if (!deletedRide) return;
+
+  const userId = deletedRide.userId;
+  if (!userId) return;
+
+  // Recalculate all time periods and transit types
+  for (const timePeriod of timePeriods) {
+    for (const transitType of transitTypes) {
+      const stats = await calculateStats(userId, timePeriod, transitType);
+
+      await db
+        .collection('users')
+        .doc(userId)
+        .collection('stats')
+        .doc(`${timePeriod}_${transitType}`)
+        .set({
+          ...stats,
+          timePeriod,
+          transitType,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+    }
+  }
+
+  // Recalculate leaderboard metrics for all categories/timePeriods (they’ll be picked up by the scheduled task)
+
+  // Remove deleted ride’s recent selections if it was the only one
+  await updateRecentSelections(userId, null);
+
+  console.log(`🗑️ Ride deleted and cleanup completed for user: ${userId}`);
+});
+
 // ---------------- HELPER: RIDE STREAK ---------------- //
 
 async function handleStreakUpdate(userId, startTime) {
@@ -168,6 +204,8 @@ async function handleStreakUpdate(userId, startTime) {
 // ---------------- HELPER: RECENT SELECTIONS ---------------- //
 
 async function updateRecentSelections(userId, rideSnap) {
+  if (!rideSnap) return;
+
   const fields = ['line', 'startStop', 'endStop'];
 
   for (const field of fields) {
