@@ -438,3 +438,37 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     distanceKm: Math.round(distanceKm * 1000) / 1000
   };
 });
+
+// ---------------- OPTIMIZE PROFILE PHOTO ON UPLOAD ---------------- //
+// This Cloud Function triggers when a new profile photo is uploaded to Storage.
+// It auto-compresses and resizes the image to 512x512 JPG format to save bandwidth and storage.
+
+exports.optimizeProfilePhoto = onObjectFinalized({
+  bucket: 'transit-stats.appspot.com', // ✅ Your actual Firebase Storage bucket
+  eventFilters: {
+    resource: 'projects/_/buckets/transit-stats.appspot.com/objects/profilePhotos/**'
+  }
+}, async (event) => {
+  const filePath = event.data.name;
+  const bucket = storage.bucket(event.data.bucket);
+  const tempFilePath = `/tmp/original.jpg`;
+  const outputPath = `/tmp/optimized.jpg`;
+
+  // 🔒 Only process files inside the "profilePhotos/" folder
+  if (!filePath || !filePath.startsWith('profilePhotos/')) return;
+
+  const file = bucket.file(filePath);
+  await file.download({ destination: tempFilePath });
+
+  await sharp(tempFilePath)
+    .resize(512, 512)
+    .jpeg({ quality: 70 })
+    .toFile(outputPath);
+
+  await bucket.upload(outputPath, {
+    destination: filePath,
+    metadata: { contentType: 'image/jpeg' },
+  });
+
+  console.log(`✅ Compressed and optimized profile photo: ${filePath}`);
+});
