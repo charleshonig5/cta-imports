@@ -132,7 +132,6 @@ exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
   const userId = deletedRide.userId;
   if (!userId) return;
 
-  // Recalculate all time periods and transit types
   for (const timePeriod of timePeriods) {
     for (const transitType of transitTypes) {
       const stats = await calculateStats(userId, timePeriod, transitType);
@@ -151,9 +150,6 @@ exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
     }
   }
 
-  // Recalculate leaderboard metrics for all categories/timePeriods (they’ll be picked up by the scheduled task)
-
-  // Remove deleted ride’s recent selections if it was the only one
   await updateRecentSelections(userId, null);
 
   console.log(`🗑️ Ride deleted and cleanup completed for user: ${userId}`);
@@ -231,7 +227,6 @@ async function updateRecentSelections(userId, rideSnap) {
     await ref.set({ items: updated });
   }
 
-  // Fallback population: most-used stops (just starting here with startStop)
   const startStop = rideSnap.get('startStop');
   if (startStop) {
     const ref = db
@@ -398,4 +393,48 @@ exports.sendRideReminder = onCall(async (request) => {
   await admin.messaging().sendToDevice(user.fcmToken, payload);
   console.log(`✅ Notification sent to ${userId}`);
   return { success: true };
+});
+
+// ---------------- ESTIMATE RIDE TIME & DISTANCE ---------------- //
+
+exports.estimateRideTimeAndDistance = onCall(async (request) => {
+  const { routeId, directionId, startStopId, endStopId } = request.data;
+
+  if (!routeId || !directionId || !startStopId || !endStopId) {
+    throw new Error("Missing required parameters.");
+  }
+
+  const tripsSnapshot = await db.collection('trips')
+    .where('route_id', '==', routeId)
+    .where('direction_id', '==', directionId)
+    .limit(1)
+    .get();
+
+  if (tripsSnapshot.empty) {
+    throw new Error("No matching trip found.");
+  }
+
+  const tripId = tripsSnapshot.docs[0].id;
+
+  const startSnap = await db.doc(`stop_times/${tripId}/stops/${startStopId}`).get();
+  const endSnap = await db.doc(`stop_times/${tripId}/stops/${endStopId}`).get();
+
+  if (!startSnap.exists || !endSnap.exists) {
+    throw new Error("Start or end stop not found in this trip.");
+  }
+
+  const start = startSnap.data();
+  const end = endSnap.data();
+
+  const durationSeconds = end.arrivalTimeSeconds - start.arrivalTimeSeconds;
+  const distanceKm = end.shapeDistTraveled - start.shapeDistTraveled;
+
+  if (durationSeconds <= 0 || distanceKm < 0) {
+    throw new Error("Invalid stop order or data.");
+  }
+
+  return {
+    durationSeconds,
+    distanceKm: Math.round(distanceKm * 1000) / 1000
+  };
 });
