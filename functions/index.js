@@ -444,8 +444,8 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
 // This Cloud Function triggers when a new profile photo is uploaded to Storage.
 // It auto-compresses and resizes the image to 512x512 JPG format to save bandwidth and storage.
 
-exports.optimizeProfilePhoto = onObjectFinalized({
-  bucket: 'transit-stats.appspot.com', // ✅ Your actual Firebase Storage bucket
+exports.optimizeProfilePhoto = functions.storage.bucket('transit-stats.appspot.com').onObjectFinalized({
+  region: 'us-central1', // ✅ Set this to your actual bucket region if different
   eventFilters: {
     resource: 'projects/_/buckets/transit-stats.appspot.com/objects/profilePhotos/**'
   }
