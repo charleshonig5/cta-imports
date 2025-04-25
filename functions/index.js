@@ -3,6 +3,7 @@ const admin = require('firebase-admin');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onDocumentWritten, onDocumentDeleted } = require('firebase-functions/v2/firestore');
 const { onCall } = require("firebase-functions/v2/https");
+const { onObjectFinalized } = require('firebase-functions/v2/storage'); // ✅ this is new
 const { FieldValue } = require('firebase-admin/firestore');
 
 admin.initializeApp();
