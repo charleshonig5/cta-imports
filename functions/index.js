@@ -3,11 +3,13 @@ const admin = require('firebase-admin');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onDocumentWritten, onDocumentDeleted } = require('firebase-functions/v2/firestore');
 const { onCall } = require("firebase-functions/v2/https");
-const { onObjectFinalized } = require('firebase-functions/v2/storage'); // ✅ this is new
+const { onObjectFinalized } = require('firebase-functions/v2/storage');
 const { FieldValue } = require('firebase-admin/firestore');
+const sharp = require('sharp'); // Required for profile photo compression
 
 admin.initializeApp();
 const db = admin.firestore();
+const storage = admin.storage();
 
 // ---------------- LEADERBOARD ---------------- //
 
@@ -81,7 +83,6 @@ exports.scheduledLeaderboardUpdate = onSchedule('every 15 minutes', async () => 
 
   console.log('🏆 Leaderboards and personal ranks updated.');
 });
-
 // ---------------- STATS + STREAKS ---------------- //
 
 const transitTypes = ['all', 'bus', 'train'];
@@ -95,7 +96,13 @@ exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
   if (!userId) return;
 
   const isManual = rideSnap.get('manualEntry');
+  const inProgress = rideSnap.get('inProgress') || false;
   const startTime = rideSnap.get('startTime');
+
+  if (inProgress) {
+    console.log(`🚧 Ride in progress, skipping stats update for now: ${userId}`);
+    return;
+  }
 
   if (!isManual && startTime) {
     await handleStreakUpdate(userId, startTime);
@@ -124,14 +131,19 @@ exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
   console.log(`✅ Stats updated in real-time for user: ${userId}`);
 });
 
-// ---------------- RIDE DELETE CLEANUP ---------------- //
-
 exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
   const deletedRide = event.data?.data();
   if (!deletedRide) return;
 
   const userId = deletedRide.userId;
   if (!userId) return;
+
+  const inProgress = deletedRide.inProgress || false;
+
+  if (inProgress) {
+    console.log(`🗑️ In-progress ride deleted, skipping stats cleanup: ${userId}`);
+    return;
+  }
 
   for (const timePeriod of timePeriods) {
     for (const transitType of transitTypes) {
@@ -155,7 +167,6 @@ exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
 
   console.log(`🗑️ Ride deleted and cleanup completed for user: ${userId}`);
 });
-
 // ---------------- HELPER: RIDE STREAK ---------------- //
 
 async function handleStreakUpdate(userId, startTime) {
@@ -244,7 +255,6 @@ async function updateRecentSelections(userId, rideSnap) {
     await ref.set({ items: updated });
   }
 }
-
 // ---------------- HELPER: CALCULATE STATS ---------------- //
 
 async function calculateStats(userId, timePeriod, transitType) {
@@ -267,7 +277,10 @@ async function calculateStats(userId, timePeriod, transitType) {
   const ridesSnapshot = await ridesQuery.get();
   const rides = ridesSnapshot.docs
     .map((doc) => doc.data())
-    .filter((ride) => transitType === 'all' || ride.type === transitType);
+    .filter((ride) => 
+      (transitType === 'all' || ride.type === transitType) && 
+      !ride.inProgress // ✅ skip in-progress rides when calculating stats
+    );
 
   let totalDistance = 0;
   let totalTime = 0;
@@ -335,12 +348,18 @@ async function calculateStats(userId, timePeriod, transitType) {
 
     const co2This = thisMonth.docs
       .map((doc) => doc.data())
-      .filter((ride) => transitType === 'all' || ride.type === transitType)
+      .filter((ride) => 
+        (transitType === 'all' || ride.type === transitType) && 
+        !ride.inProgress
+      )
       .reduce((sum, ride) => sum + ride.distanceKm * (ride.type === 'bus' ? 0.15 : 0.2), 0);
 
     const co2Last = lastMonth.docs
       .map((doc) => doc.data())
-      .filter((ride) => transitType === 'all' || ride.type === transitType)
+      .filter((ride) => 
+        (transitType === 'all' || ride.type === transitType) &&
+        !ride.inProgress
+      )
       .reduce((sum, ride) => sum + ride.distanceKm * (ride.type === 'bus' ? 0.15 : 0.2), 0);
 
     co2Change = co2This - co2Last;
@@ -370,7 +389,6 @@ async function calculateStats(userId, timePeriod, transitType) {
     longestRideRoute,
   };
 }
-
 // ---------------- PUSH NOTIFICATIONS ---------------- //
 
 exports.sendRideReminder = onCall(async (request) => {
@@ -439,13 +457,120 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     distanceKm: Math.round(distanceKm * 1000) / 1000
   };
 });
+// ---------------- LIVE RIDE TRACKING FUNCTIONS ---------------- //
 
+// Start a new live ride
+exports.startLiveRide = onCall(async (request) => {
+  const { userId, type, line, startStop } = request.data;
+  if (!userId || !type || !startStop) {
+    throw new Error('Missing required parameters.');
+  }
+
+  const rideData = {
+    userId,
+    startTime: FieldValue.serverTimestamp(),
+    type,
+    line: line || null,
+    startStop,
+    endStop: null,
+    inProgress: true,
+    distanceMiles: 0,
+    durationSeconds: 0,
+    manualEntry: false,
+  };
+
+  const rideRef = await db.collection('rides').add(rideData);
+
+  console.log(`🚀 Live ride started for user: ${userId}, rideId: ${rideRef.id}`);
+  return { rideId: rideRef.id };
+});
+
+// Update an active live ride
+exports.updateLiveRide = onCall(async (request) => {
+  const { rideId, distanceIncrementMiles, timeIncrementSeconds } = request.data;
+
+  if (!rideId || distanceIncrementMiles == null || timeIncrementSeconds == null) {
+    throw new Error('Missing required parameters.');
+  }
+
+  const rideRef = db.collection('rides').doc(rideId);
+  const rideSnap = await rideRef.get();
+
+  if (!rideSnap.exists) {
+    throw new Error('Ride not found.');
+  }
+
+  const ride = rideSnap.data();
+
+  if (!ride.inProgress) {
+    throw new Error('Cannot update a completed ride.');
+  }
+
+  await rideRef.update({
+    distanceMiles: FieldValue.increment(distanceIncrementMiles),
+    durationSeconds: FieldValue.increment(timeIncrementSeconds),
+  });
+
+  console.log(`⏱️ Ride updated: ${rideId} (+${distanceIncrementMiles} mi, +${timeIncrementSeconds}s)`);
+  return { success: true };
+});
+
+// End a live ride (finalize)
+exports.endLiveRide = onCall(async (request) => {
+  const { rideId, endStop } = request.data;
+
+  if (!rideId || !endStop) {
+    throw new Error('Missing required parameters.');
+  }
+
+  const rideRef = db.collection('rides').doc(rideId);
+  const rideSnap = await rideRef.get();
+
+  if (!rideSnap.exists) {
+    throw new Error('Ride not found.');
+  }
+
+  const ride = rideSnap.data();
+
+  if (!ride.inProgress) {
+    throw new Error('Ride already completed.');
+  }
+
+  const distanceMiles = ride.distanceMiles || 0;
+  const durationMinutes = Math.round((ride.durationSeconds || 0) / 60);
+  const distanceKm = distanceMiles * 1.60934;
+
+  await rideRef.update({
+    inProgress: false,
+    endStop,
+    distanceKm,
+    durationMinutes,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  console.log(`✅ Ride finalized for rideId: ${rideId}`);
+  return { success: true };
+});
+
+// Discard a live ride (delete)
+exports.discardLiveRide = onCall(async (request) => {
+  const { rideId } = request.data;
+
+  if (!rideId) {
+    throw new Error('Missing rideId.');
+  }
+
+  await db.collection('rides').doc(rideId).delete();
+
+  console.log(`🗑️ Live ride discarded: ${rideId}`);
+  return { success: true };
+});
 // ---------------- OPTIMIZE PROFILE PHOTO ON UPLOAD ---------------- //
 // This Cloud Function triggers when a new profile photo is uploaded to Storage.
 // It auto-compresses and resizes the image to 512x512 JPG format to save bandwidth and storage.
 
 exports.optimizeProfilePhoto = onObjectFinalized({
-  region: 'us-central1', // ✅ make sure this matches your actual bucket region
+  region: 'us-central1',
   eventFilters: [
     { attribute: 'bucket', value: 'transit-stats.appspot.com' },
     { attribute: 'name', value: 'profilePhotos/**' }
