@@ -599,3 +599,41 @@ exports.optimizeProfilePhoto = onObjectFinalized({
 
   console.log(`✅ Compressed and optimized profile photo: ${filePath}`);
 });
+
+// ----- PRO UPGRADE FUNCTIONS ----- //
+
+const { onCall } = require("firebase-functions/v2/https");
+
+// Callable function to upgrade a user to Pro
+exports.upgradeUserToPro = onCall(async (request) => {
+  const uid = request.auth?.uid;
+
+  if (!uid) {
+    throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated.');
+  }
+
+  const userRef = db.collection('users').doc(uid);
+
+  await userRef.update({
+    isPro: true
+  });
+
+  return { success: true, message: 'User upgraded to Pro.' };
+});
+
+// (Optional) Callable function to revoke Pro status
+exports.revokeProStatus = onCall(async (request) => {
+  const uid = request.auth?.uid;
+
+  if (!uid) {
+    throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated.');
+  }
+
+  const userRef = db.collection('users').doc(uid);
+
+  await userRef.update({
+    isPro: false
+  });
+
+  return { success: true, message: 'Pro status revoked.' };
+});
