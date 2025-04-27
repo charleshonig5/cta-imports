@@ -602,8 +602,6 @@ exports.optimizeProfilePhoto = onObjectFinalized({
 
 // ----- PRO UPGRADE FUNCTIONS ----- //
 
-const { onCall } = require("firebase-functions/v2/https");
-
 // Callable function to upgrade a user to Pro
 exports.upgradeUserToPro = onCall(async (request) => {
   const uid = request.auth?.uid;
