@@ -391,7 +391,6 @@ async function calculateStats(userId, timePeriod, transitType) {
 }
 // ---------------- PUSH NOTIFICATIONS ---------------- //
 
-const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onCall } = require("firebase-functions/v2/https");
 
 // Send notification suggesting the user to start a ride
