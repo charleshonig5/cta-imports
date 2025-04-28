@@ -391,8 +391,6 @@ async function calculateStats(userId, timePeriod, transitType) {
 }
 // ---------------- PUSH NOTIFICATIONS ---------------- //
 
-const { onCall } = require("firebase-functions/v2/https");
-
 // Send notification suggesting the user to start a ride
 exports.sendRideStartReminder = onCall(async (request) => {
   const { userId } = request.data;
