@@ -391,7 +391,11 @@ async function calculateStats(userId, timePeriod, transitType) {
 }
 // ---------------- PUSH NOTIFICATIONS ---------------- //
 
-exports.sendRideReminder = onCall(async (request) => {
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onCall } = require("firebase-functions/v2/https");
+
+// Send notification suggesting the user to start a ride
+exports.sendRideStartReminder = onCall(async (request) => {
   const { userId } = request.data;
   if (!userId) throw new Error("Missing userId");
 
@@ -404,15 +408,94 @@ exports.sendRideReminder = onCall(async (request) => {
 
   const payload = {
     notification: {
-      title: "Don't forget to start tracking!",
-      body: "It looks like you may be on a ride. Tap to start tracking your stats.",
+      title: "Ready to Ride?",
+      body: "It looks like you're near transit. Tap to start tracking your ride!",
     },
   };
 
   await admin.messaging().sendToDevice(user.fcmToken, payload);
-  console.log(`✅ Notification sent to ${userId}`);
+  console.log(`✅ Start ride notification sent to ${userId}`);
   return { success: true };
 });
+
+// Send notification suggesting the user to end a ride
+exports.sendRideEndReminder = onCall(async (request) => {
+  const { userId } = request.data;
+  if (!userId) throw new Error("Missing userId");
+
+  const userDoc = await db.collection("users").doc(userId).get();
+  const user = userDoc.data();
+
+  if (!user?.fcmToken) {
+    throw new Error("No FCM token found for user.");
+  }
+
+  const payload = {
+    notification: {
+      title: "End your Ride?",
+      body: "It looks like you might have finished your ride. Tap to end tracking!",
+    },
+  };
+
+  await admin.messaging().sendToDevice(user.fcmToken, payload);
+  console.log(`✅ End ride notification sent to ${userId}`);
+  return { success: true };
+});
+
+// Scheduled function to smartly detect users needing ride reminders
+exports.smartRideNotificationSweep = onSchedule("every 5 minutes", async (event) => {
+  console.log("🚀 Running smart ride notification sweep...");
+
+  const snapshot = await db.collection("users").get();
+  const now = Date.now();
+
+  for (const userDoc of snapshot.docs) {
+    const userData = userDoc.data();
+    const userId = userDoc.id;
+
+    if (!userData?.fcmToken) continue; // Skip if no device token
+
+    const lastRideStart = userData.lastRideStartTime?.toMillis?.() || 0;
+    const lastMotion = userData.lastMotionTimestamp?.toMillis?.() || 0;
+    const isRiding = userData.isCurrentlyRiding || false;
+
+    const hoursSinceLastRide = (now - lastRideStart) / (1000 * 60 * 60);
+    const minutesSinceLastMotion = (now - lastMotion) / (1000 * 60);
+
+    let sentNotification = false;
+
+    // Logic: Remind user to start a ride
+    if (!isRiding && hoursSinceLastRide > 4) {
+      console.log(`🚲 Sending Start Ride reminder to ${userId}`);
+      await admin.messaging().sendToDevice(userData.fcmToken, {
+        notification: {
+          title: "Ready to Ride?",
+          body: "It looks like it's been a while. Start tracking your next ride!",
+        },
+      });
+      sentNotification = true;
+    }
+
+    // Logic: Remind user to end a ride
+    if (isRiding && minutesSinceLastMotion > 10) {
+      console.log(`🏁 Sending End Ride reminder to ${userId}`);
+      await admin.messaging().sendToDevice(userData.fcmToken, {
+        notification: {
+          title: "End your Ride?",
+          body: "It looks like you've been stopped for a while. End your ride if finished!",
+        },
+      });
+      sentNotification = true;
+    }
+
+    if (!sentNotification) {
+      console.log(`ℹ️ No notifications needed for ${userId} this cycle.`);
+    }
+  }
+
+  console.log("✅ Smart ride notification sweep complete.");
+});
+
 
 // ---------------- ESTIMATE RIDE TIME & DISTANCE ---------------- //
 
