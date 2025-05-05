@@ -871,3 +871,17 @@ exports.onStreakUpdate = onDocumentWritten("users/{userId}/streaks", async (even
   if (currentStreak === 30) await unlockAchievement(userId, "cta_loyalist");
   if (currentStreak === 60) await unlockAchievement(userId, "unstoppable");
 });
+
+// ---------------- SHARE ACHIEVEMENT ---------------- //
+
+exports.recordShareAction = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated.');
+  }
+
+  await unlockAchievement(uid, "sharing_is_caring");
+
+  console.log(`🔗 Share action recorded and achievement unlocked for ${uid}`);
+  return { success: true };
+});
