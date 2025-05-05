@@ -715,3 +715,106 @@ exports.revokeProStatus = onCall(async (request) => {
 
   return { success: true, message: 'Pro status revoked.' };
 });
+
+// ---------------- ACHIEVEMENTS ---------------- //
+
+const unlockAchievement = async (userId, achievementId) => {
+  const userRef = db.collection('users').doc(userId);
+  const achievementRef = userRef.collection('achievements').doc(achievementId);
+  const alreadyUnlocked = (await achievementRef.get()).exists;
+
+  if (!alreadyUnlocked) {
+    const globalRef = db.collection('achievements').doc(achievementId);
+    const globalDoc = await globalRef.get();
+    if (!globalDoc.exists) return;
+
+    const { name, description, category } = globalDoc.data();
+
+    await achievementRef.set({
+      unlocked: true,
+      unlockedAt: FieldValue.serverTimestamp(),
+      name,
+      description,
+      category
+    });
+
+    await userRef.collection('uiState').doc('achievementPopup').set({
+      achievementId,
+      name,
+      description,
+      shown: false,
+      unlockedAt: FieldValue.serverTimestamp()
+    });
+  }
+};
+
+exports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async (event) => {
+  const userId = event.params.userId;
+  const ride = event.data?.data();
+
+  if (!ride) return;
+
+  const userRef = db.collection('users').doc(userId);
+  const snapshot = await userRef.collection('rides').get();
+  const totalRides = snapshot.size;
+
+  const userDoc = await userRef.get();
+  const userData = userDoc.data();
+  const totalDistance = userData?.stats?.totalDistance || 0;
+  const totalCO2 = userData?.stats?.totalCO2Saved || 0;
+
+  // RIDE COUNT achievements
+  if (totalRides === 1) await unlockAchievement(userId, "getting_started");
+  if (totalRides === 10) await unlockAchievement(userId, "getting_the_hang");
+  if (totalRides === 25) await unlockAchievement(userId, "city_commuter");
+  if (totalRides === 50) await unlockAchievement(userId, "transit_regular");
+  if (totalRides === 100) await unlockAchievement(userId, "transit_hero");
+  if (totalRides === 250) await unlockAchievement(userId, "ultimate_rider");
+
+  // DISTANCE achievements
+  if (totalDistance >= 10) await unlockAchievement(userId, "warming_up");
+  if (totalDistance >= 25) await unlockAchievement(userId, "rolling_along");
+  if (totalDistance >= 50) await unlockAchievement(userId, "transit_star");
+  if (totalDistance >= 100) await unlockAchievement(userId, "transit_veteran");
+  if (totalDistance >= 250) await unlockAchievement(userId, "master_of_the_map");
+
+  // CO2 achievements
+  if (totalCO2 >= 10) await unlockAchievement(userId, "carbon_kicker");
+  if (totalCO2 >= 25) await unlockAchievement(userId, "eco_rider");
+  if (totalCO2 >= 50) await unlockAchievement(userId, "planet_mover");
+  if (totalCO2 >= 100) await unlockAchievement(userId, "green_machine");
+  if (totalCO2 >= 250) await unlockAchievement(userId, "sustainability_hero");
+
+  // SPECIALTY ride-based achievements
+  const isLive = ride.wasLiveTracked;
+  const stopCount = ride?.stopCount || 0;
+  const startStop = ride?.startStopId;
+  const endStop = ride?.endStopId;
+  const timestamp = ride?.timestamp?.toDate?.() || new Date(ride?.timestamp?._seconds * 1000 || Date.now());
+  const hour = timestamp.getHours();
+
+  if (isLive && hour >= 23) await unlockAchievement(userId, "night_owl");
+  if (isLive && hour < 6) await unlockAchievement(userId, "early_bird");
+
+  if (startStop && endStop && startStop === endStop) {
+    await unlockAchievement(userId, "loop_de_loop");
+  }
+
+  if (stopCount === 1) await unlockAchievement(userId, "one_stop_wonder");
+  if (stopCount >= 15) await unlockAchievement(userId, "scenic_route");
+});
+
+exports.onUserUpdated = onDocumentUpdated("users/{userId}", async (event) => {
+  const before = event.data?.before?.data();
+  const after = event.data?.after?.data();
+  const userId = event.params.userId;
+
+  if (!before || !after) return;
+
+  const wasPro = before.isPro || false;
+  const isNowPro = after.isPro || false;
+
+  if (!wasPro && isNowPro) {
+    await unlockAchievement(userId, "pro_status");
+  }
+});
