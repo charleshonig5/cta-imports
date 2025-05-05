@@ -819,3 +819,21 @@ exports.onUserUpdated = onDocumentUpdated("users/{userId}", async (event) => {
     await unlockAchievement(userId, "pro_status");
   }
 });
+
+// ---------------- RIDE STREAK ACHIEVEMENTS ---------------- //
+
+exports.onStreakUpdate = onDocumentWritten("users/{userId}/streaks", async (event) => {
+  const userId = event.params.userId;
+  const after = event.data?.after?.data();
+
+  if (!after) return;
+
+  const currentStreak = after.currentStreak || 0;
+
+  // Ride streak milestone achievements
+  if (currentStreak === 3) await unlockAchievement(userId, "quick_streak");
+  if (currentStreak === 7) await unlockAchievement(userId, "one_week_warrior");
+  if (currentStreak === 14) await unlockAchievement(userId, "on_a_roll");
+  if (currentStreak === 30) await unlockAchievement(userId, "cta_loyalist");
+  if (currentStreak === 60) await unlockAchievement(userId, "unstoppable");
+});
