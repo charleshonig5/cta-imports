@@ -803,6 +803,40 @@ exports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async
 
   if (stopCount === 1) await unlockAchievement(userId, "one_stop_wonder");
   if (stopCount >= 15) await unlockAchievement(userId, "scenic_route");
+
+  // LINE COMPLETION ACHIEVEMENTS --------------------
+  const lineId = ride?.lineId;
+  const type = ride?.type;
+
+  if (lineId && type) {
+    const linesUsedRef = db.collection("users").doc(userId).collection("linesUsed").doc("lines");
+    const linesUsedDoc = await linesUsedRef.get();
+    let trainLines = linesUsedDoc.exists ? linesUsedDoc.data().trainLines || [] : [];
+    let busLines = linesUsedDoc.exists ? linesUsedDoc.data().busLines || [] : [];
+
+    const isNewTrainLine = type === "train" && !trainLines.includes(lineId);
+    const isNewBusLine = type === "bus" && !busLines.includes(lineId);
+
+    if (isNewTrainLine) {
+      trainLines.push(lineId);
+      await linesUsedRef.set({ trainLines }, { merge: true });
+
+      const allTrainLines = ["Red", "Blue", "Brown", "Green", "Orange", "Purple", "Pink", "Yellow"];
+      const allUsed = allTrainLines.every(l => trainLines.includes(l));
+      if (allUsed) {
+        await unlockAchievement(userId, "all_aboard");
+      }
+    }
+
+    if (isNewBusLine) {
+      busLines.push(lineId);
+      await linesUsedRef.set({ busLines }, { merge: true });
+
+      if (busLines.length >= 120) {
+        await unlockAchievement(userId, "wheels_of_the_city");
+      }
+    }
+  }
 });
 
 exports.onUserUpdated = onDocumentUpdated("users/{userId}", async (event) => {
