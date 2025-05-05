@@ -1,11 +1,12 @@
 const functions = require('firebase-functions/v2');
 const admin = require('firebase-admin');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onDocumentWritten, onDocumentDeleted } = require('firebase-functions/v2/firestore');
+const { onDocumentCreated, onDocumentUpdated, onDocumentWritten, onDocumentDeleted } = require('firebase-functions/v2/firestore');
 const { onCall } = require("firebase-functions/v2/https");
 const { onObjectFinalized } = require('firebase-functions/v2/storage');
 const { FieldValue } = require('firebase-admin/firestore');
 const sharp = require('sharp'); // Required for profile photo compression
+
 
 admin.initializeApp();
 const db = admin.firestore();
