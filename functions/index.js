@@ -743,6 +743,8 @@ const unlockAchievement = async (userId, achievementId) => {
       achievementId,
       name,
       description,
+      category,
+      imageUrl,
       shown: false,
       unlockedAt: FieldValue.serverTimestamp()
     });
