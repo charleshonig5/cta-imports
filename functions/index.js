@@ -256,13 +256,14 @@ async function updateRecentSelections(userId, rideSnap) {
     await ref.set({ items: updated });
   }
 }
-// ---------------- HELPER: CALCULATE STATS ---------------- //
+// ---------------- UPDATED CALCULATE STATS ---------------- //
 
 async function calculateStats(userId, timePeriod, transitType) {
   let ridesQuery = db.collection('rides').where('userId', '==', userId);
   const now = new Date();
   let startDate;
 
+  // Set startDate based on time period
   switch (timePeriod) {
     case '1w': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
     case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
@@ -275,12 +276,13 @@ async function calculateStats(userId, timePeriod, transitType) {
     ridesQuery = ridesQuery.where('startTime', '>=', startDate);
   }
 
+  // Fetch and filter rides
   const ridesSnapshot = await ridesQuery.get();
   const rides = ridesSnapshot.docs
     .map((doc) => doc.data())
     .filter((ride) => 
       (transitType === 'all' || ride.type === transitType) && 
-      !ride.inProgress // ✅ skip in-progress rides when calculating stats
+      !ride.inProgress 
     );
 
   let totalDistance = 0;
@@ -306,8 +308,7 @@ async function calculateStats(userId, timePeriod, transitType) {
       lastChargeTime = rideStart;
     }
 
-    if (type === 'bus') co2Saved += distanceKm * 0.15;
-    if (type === 'train') co2Saved += distanceKm * 0.2;
+    co2Saved += distanceKm * (type === 'bus' ? 0.15 : 0.2);
 
     if (!longestRide || distanceKm > longestRide.distanceKm) {
       longestRide = { distanceKm, line, startStop, endStop };
@@ -324,46 +325,45 @@ async function calculateStats(userId, timePeriod, transitType) {
   const totalTimeHours = Math.floor(totalTime / 60);
   const totalTimeRemainingMinutes = totalTime % 60;
 
-  let co2Change = null;
+  // Calculate the average distance per week
   let averageDistancePerWeek = 0;
-
   if (startDate) {
     const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
     if (durationWeeks > 0) averageDistancePerWeek = totalDistance / durationWeeks;
   }
 
+  // Monthly change calculations
+  let rideCountChange = null;
+  let co2Change = null;
+
   if (timePeriod === 'allTime') {
     const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
-    const thisMonth = await db.collection('rides')
-      .where('userId', '==', userId)
-      .where('startTime', '>=', startOfThisMonth)
-      .get();
-
-    const lastMonth = await db.collection('rides')
+    // Ride Count Change
+    const ridesLastMonthSnapshot = await db.collection('rides')
       .where('userId', '==', userId)
       .where('startTime', '>=', startOfLastMonth)
       .where('startTime', '<', startOfThisMonth)
       .get();
 
-    const co2This = thisMonth.docs
-      .map((doc) => doc.data())
-      .filter((ride) => 
-        (transitType === 'all' || ride.type === transitType) && 
-        !ride.inProgress
-      )
-      .reduce((sum, ride) => sum + ride.distanceKm * (ride.type === 'bus' ? 0.15 : 0.2), 0);
-
-    const co2Last = lastMonth.docs
+    const ridesLastMonth = ridesLastMonthSnapshot.docs
       .map((doc) => doc.data())
       .filter((ride) => 
         (transitType === 'all' || ride.type === transitType) &&
         !ride.inProgress
-      )
-      .reduce((sum, ride) => sum + ride.distanceKm * (ride.type === 'bus' ? 0.15 : 0.2), 0);
+      ).length;
 
-    co2Change = co2This - co2Last;
+    rideCountChange = totalRides - ridesLastMonth;
+
+    // CO₂ Saved Change
+    const co2LastMonth = ridesLastMonthSnapshot.docs
+      .map((doc) => doc.data())
+      .reduce((sum, ride) => 
+        sum + ride.distanceKm * (ride.type === 'bus' ? 0.15 : 0.2), 0
+      );
+
+    co2Change = co2Saved - co2LastMonth;
   }
 
   const longestRideMiles = longestRide ? longestRide.distanceKm * 0.621371 : 0;
@@ -374,22 +374,24 @@ async function calculateStats(userId, timePeriod, transitType) {
 
   return {
     totalDistance,
+    averageDistancePerWeek,
     totalTimeMinutes: totalTime,
     totalTimeHours,
     totalTimeRemainingMinutes,
     totalRides,
+    rideCountChange,
     totalCost,
+    costPerMile,
     co2Saved,
+    co2Change,
     mostUsedLine,
     mostUsedLineCount,
-    costPerMile,
-    averageDistancePerWeek,
-    co2Change,
     longestRideMiles,
     longestRideLine,
     longestRideRoute,
   };
 }
+
 // ---------------- PUSH NOTIFICATIONS ---------------- //
 
 // Send notification suggesting the user to start a ride
