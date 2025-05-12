@@ -89,6 +89,9 @@ exports.scheduledLeaderboardUpdate = onSchedule('every 15 minutes', async () => 
 const transitTypes = ['all', 'bus', 'train'];
 const timePeriods = ['allTime', '1w', '1m', '1y', 'ytd'];
 
+/**
+ * 🔄 Update User Stats on Ride Write (Create or Update)
+ */
 exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
   const rideSnap = event.data?.after;
   if (!rideSnap) return;
@@ -111,6 +114,7 @@ exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
 
   await updateRecentSelections(userId, rideSnap);
 
+  // Loop through all time periods and transit types and update stats
   for (const timePeriod of timePeriods) {
     for (const transitType of transitTypes) {
       const stats = await calculateStats(userId, timePeriod, transitType);
@@ -121,7 +125,22 @@ exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
         .collection('stats')
         .doc(`${timePeriod}_${transitType}`)
         .set({
-          ...stats,
+          totalDistance: stats.totalDistance,
+          averageDistancePerWeek: stats.averageDistancePerWeek,
+          totalTimeMinutes: stats.totalTimeMinutes,
+          totalTimeHours: stats.totalTimeHours,
+          totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
+          totalRides: stats.totalRides,
+          rideCountChange: stats.rideCountChange || 0, // 🚀 New Stat Added Here
+          totalCost: stats.totalCost,
+          costPerMile: stats.costPerMile,
+          co2Saved: stats.co2Saved,
+          co2Change: stats.co2Change || 0, // 🚀 New Stat Added Here
+          mostUsedLine: stats.mostUsedLine,
+          mostUsedLineCount: stats.mostUsedLineCount,
+          longestRideMiles: stats.longestRideMiles,
+          longestRideLine: stats.longestRideLine,
+          longestRideRoute: stats.longestRideRoute,
           timePeriod,
           transitType,
           updatedAt: FieldValue.serverTimestamp(),
@@ -132,6 +151,9 @@ exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
   console.log(`✅ Stats updated in real-time for user: ${userId}`);
 });
 
+/**
+ * 🗑️ Cleanup and Update User Stats on Ride Delete
+ */
 exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
   const deletedRide = event.data?.data();
   if (!deletedRide) return;
@@ -146,6 +168,7 @@ exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
     return;
   }
 
+  // Loop through all time periods and transit types and update stats after deletion
   for (const timePeriod of timePeriods) {
     for (const transitType of transitTypes) {
       const stats = await calculateStats(userId, timePeriod, transitType);
@@ -156,7 +179,22 @@ exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
         .collection('stats')
         .doc(`${timePeriod}_${transitType}`)
         .set({
-          ...stats,
+          totalDistance: stats.totalDistance,
+          averageDistancePerWeek: stats.averageDistancePerWeek,
+          totalTimeMinutes: stats.totalTimeMinutes,
+          totalTimeHours: stats.totalTimeHours,
+          totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
+          totalRides: stats.totalRides,
+          rideCountChange: stats.rideCountChange || 0, // 🚀 Monthly change patched here
+          totalCost: stats.totalCost,
+          costPerMile: stats.costPerMile,
+          co2Saved: stats.co2Saved,
+          co2Change: stats.co2Change || 0, // 🚀 Monthly change patched here
+          mostUsedLine: stats.mostUsedLine,
+          mostUsedLineCount: stats.mostUsedLineCount,
+          longestRideMiles: stats.longestRideMiles,
+          longestRideLine: stats.longestRideLine,
+          longestRideRoute: stats.longestRideRoute,
           timePeriod,
           transitType,
           updatedAt: FieldValue.serverTimestamp(),
@@ -166,8 +204,9 @@ exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
 
   await updateRecentSelections(userId, null);
 
-  console.log(`🗑️ Ride deleted and cleanup completed for user: ${userId}`);
+  console.log(`🗑️ Ride deleted and stats cleanup completed for user: ${userId}`);
 });
+
 // ---------------- HELPER: RIDE STREAK ---------------- //
 
 async function handleStreakUpdate(userId, startTime) {
