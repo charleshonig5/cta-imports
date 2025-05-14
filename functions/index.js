@@ -113,6 +113,7 @@ exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
   }
 
   await updateRecentSelections(userId, rideSnap);
+  await updateDetailStats(userId); // ✅ Added here
 
   // Loop through all time periods and transit types and update stats
   for (const timePeriod of timePeriods) {
@@ -203,6 +204,7 @@ exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
   }
 
   await updateRecentSelections(userId, null);
+  await updateDetailStats(userId); // ✅ Added here
 
   console.log(`🗑️ Ride deleted and stats cleanup completed for user: ${userId}`);
 });
@@ -428,6 +430,156 @@ async function calculateStats(userId, timePeriod, transitType) {
     longestRideMiles,
     longestRideLine,
     longestRideRoute,
+  };
+}
+
+// ---------------- HELPER: DETAILED STATS ---------------- //
+
+async function updateDetailStats(userId) {
+  for (const timePeriod of timePeriods) {
+    for (const transitType of transitTypes) {
+      const details = await calculateDetailStats(userId, timePeriod, transitType);
+      await db
+        .collection('users')
+        .doc(userId)
+        .collection('detailStats')
+        .doc(`${timePeriod}_${transitType}`)
+        .set({
+          ...details,
+          timePeriod,
+          transitType,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+    }
+  }
+}
+
+async function calculateDetailStats(userId, timePeriod, transitType) {
+  let ridesQuery = db.collection('rides').where('userId', '==', userId);
+  const now = new Date();
+  let startDate;
+
+  switch (timePeriod) {
+    case '1w': startDate = new Date(now.getTime() - 7 * 86400000); break;
+    case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
+    case '1y': startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); break;
+    case 'ytd': startDate = new Date(now.getFullYear(), 0, 1); break;
+    default: startDate = null;
+  }
+
+  if (startDate) {
+    ridesQuery = ridesQuery.where('startTime', '>=', startDate);
+  }
+
+  const ridesSnapshot = await ridesQuery.get();
+  const rides = ridesSnapshot.docs
+    .map(doc => doc.data())
+    .filter(ride => !ride.inProgress && (transitType === 'all' || ride.type === transitType));
+
+  const lineStats = {};
+  const stopVisits = {};
+  const longestRides = [];
+  let totalCost = 0;
+  let lastChargeTime = null;
+
+  for (const ride of rides) {
+    const {
+      line, distanceKm = 0, durationMinutes = 0, startStop, endStop,
+      startTime, type, rideId, stopCount = 0
+    } = ride;
+
+    const rideStart = new Date(startTime?.toDate ? startTime.toDate() : startTime);
+    const cost = type === 'bus' ? 2.25 : 2.5;
+
+    if (!lastChargeTime || rideStart - lastChargeTime > 2 * 60 * 60 * 1000) {
+      totalCost += cost;
+      lastChargeTime = rideStart;
+    }
+
+    if (!lineStats[line]) {
+      lineStats[line] = {
+        totalDistanceKm: 0,
+        totalMinutes: 0,
+        rideCount: 0,
+        co2Kg: 0
+      };
+    }
+
+    lineStats[line].totalDistanceKm += distanceKm;
+    lineStats[line].totalMinutes += durationMinutes;
+    lineStats[line].rideCount += 1;
+    lineStats[line].co2Kg += distanceKm * (type === 'bus' ? 0.15 : 0.2);
+
+    if (!stopVisits[line]) stopVisits[line] = {};
+    if (startStop) stopVisits[line][startStop] = (stopVisits[line][startStop] || 0) + 1;
+    if (endStop) stopVisits[line][endStop] = (stopVisits[line][endStop] || 0) + 1;
+
+    longestRides.push({
+      rideId,
+      line,
+      distanceKm,
+      startStop,
+      endStop,
+      stopCount
+    });
+  }
+
+  const topByDistance = Object.entries(lineStats)
+    .sort((a, b) => b[1].totalDistanceKm - a[1].totalDistanceKm)
+    .slice(0, 5)
+    .map(([line, data]) => ({ line, ...data }));
+
+  const topByTime = Object.entries(lineStats)
+    .sort((a, b) => b[1].totalMinutes - a[1].totalMinutes)
+    .slice(0, 5)
+    .map(([line, data]) => ({ line, totalMinutes: data.totalMinutes }));
+
+  const topByRides = Object.entries(lineStats)
+    .sort((a, b) => b[1].rideCount - a[1].rideCount)
+    .slice(0, 5)
+    .map(([line, data]) => ({ line, rideCount: data.rideCount }));
+
+  const topByCO2 = Object.entries(lineStats)
+    .sort((a, b) => b[1].co2Kg - a[1].co2Kg)
+    .slice(0, 5)
+    .map(([line, data]) => ({ line, co2Kg: data.co2Kg }));
+
+  const costPerLine = Object.entries(lineStats)
+    .map(([line, data]) => ({
+      line,
+      costPerMile: data.totalDistanceKm > 0 ? totalCost / (data.totalDistanceKm * 0.621371) : 0
+    }))
+    .sort((a, b) => b.costPerMile - a.costPerMile)
+    .slice(0, 5);
+
+  const mostUsedLineEntry = Object.entries(lineStats)
+    .sort((a, b) => b[1].rideCount - a[1].rideCount)[0];
+
+  const mostUsedLine = mostUsedLineEntry?.[0];
+  const mostUsedLineDetails = mostUsedLine ? {
+    line: mostUsedLine,
+    longestRideStops: Math.max(...longestRides.filter(r => r.line === mostUsedLine).map(r => r.stopCount || 0)),
+    topStops: Object.entries(stopVisits[mostUsedLine] || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([stop]) => stop)
+  } : null;
+
+  const longestRideList = longestRides
+    .sort((a, b) => b.distanceKm - a.distanceKm)
+    .slice(0, 5);
+
+  return {
+    distanceTopLines: topByDistance,
+    timeTopLines: topByTime,
+    rideTopLines: topByRides,
+    co2TopLines: topByCO2,
+    costAnalysis: {
+      totalSavings: totalCost,
+      topExpensiveRoutes: costPerLine
+    },
+    mostUsedLineDetails,
+    longestRides: longestRideList
   };
 }
 
