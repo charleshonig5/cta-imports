@@ -1080,3 +1080,57 @@ exports.recordShareAction = onCall(async (request) => {
   console.log(`🔗 Share action recorded and achievement unlocked for ${uid}`);
   return { success: true };
 });
+
+// ---------------- FIND NEARBY TRANSIT (AUTOFILL START STOP/LINE) ---------------- //
+
+exports.findNearbyTransit = onCall(async (request) => {
+  const { lat, lng, radiusMeters = 400 } = request.data;
+
+  if (lat == null || lng == null) {
+    throw new functions.https.HttpsError('invalid-argument', 'Missing lat or lng');
+  }
+
+  const EARTH_RADIUS = 6371000; // meters
+
+  function haversineDistance(lat1, lon1, lat2, lon2) {
+    const toRad = (x) => (x * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return EARTH_RADIUS * c;
+  }
+
+  const stopsSnapshot = await db.collection('stops').get();
+  const results = [];
+
+  for (const doc of stopsSnapshot.docs) {
+    const data = doc.data();
+    const stopLat = data.stop_lat;
+    const stopLng = data.stop_lon;
+
+    if (stopLat == null || stopLng == null) continue;
+
+    const distance = haversineDistance(lat, lng, stopLat, stopLng);
+
+    if (distance <= radiusMeters) {
+      results.push({
+        stopId: doc.id,
+        stopName: data.stop_name || '',
+        line: data.route_id || '',    // line or route ID (if available)
+        type: data.type || '',        // 'bus' or 'train' (if labeled)
+        distanceMeters: Math.round(distance),
+      });
+    }
+  }
+
+  results.sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+  console.log(`📍 Found ${results.length} stops within ${radiusMeters}m of [${lat}, ${lng}]`);
+
+  return {
+    matches: results.slice(0, 5), // return up to 5 closest stops
+  };
+});
