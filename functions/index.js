@@ -780,14 +780,26 @@ exports.updateLiveRide = onCall(async (request) => {
     throw new Error('Cannot update a completed ride.');
   }
 
+  // Update distance and time
   await rideRef.update({
     distanceMiles: FieldValue.increment(distanceIncrementMiles),
     durationSeconds: FieldValue.increment(timeIncrementSeconds),
   });
 
   console.log(`⏱️ Ride updated: ${rideId} (+${distanceIncrementMiles} mi, +${timeIncrementSeconds}s)`);
+
+  // 🔍 Check for false ride (after 10 min and under 0.1 miles)
+  const totalDistance = (ride.distanceMiles || 0) + distanceIncrementMiles;
+  const totalDuration = (ride.durationSeconds || 0) + timeIncrementSeconds;
+
+  if (totalDuration > 600 && totalDistance < 0.1 && !ride.suspectedFalseRide) {
+    await rideRef.update({ suspectedFalseRide: true });
+    console.log(`⚠️ Suspected false ride flagged after 10 min: ${rideId}`);
+  }
+
   return { success: true };
 });
+
 
 // End a live ride (finalize)
 exports.endLiveRide = onCall(async (request) => {
