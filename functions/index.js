@@ -958,7 +958,7 @@ exports.revokeProStatus = onCall(async (request) => {
 
 const unlockAchievement = async (userId, achievementId) => {
   const userRef = db.collection('users').doc(userId);
-  const achievementRef = userRef.collection('achievements').doc(achievementId);
+  const achievementRef = userRef.collection('achievementsUnlocked').doc(achievementId);
   const alreadyUnlocked = (await achievementRef.get()).exists;
 
   if (!alreadyUnlocked) {
