@@ -697,6 +697,7 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     throw new Error("Missing required parameters.");
   }
 
+  // Step 1: Get a valid trip for this route and direction
   const tripsSnapshot = await db.collection('trips')
     .where('route_id', '==', routeId)
     .where('direction_id', '==', directionId)
@@ -709,21 +710,44 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
 
   const tripId = tripsSnapshot.docs[0].id;
 
-  const startSnap = await db.doc(`stop_times/${tripId}/stops/${startStopId}`).get();
-  const endSnap = await db.doc(`stop_times/${tripId}/stops/${endStopId}`).get();
+  // Step 2: Get start and end stop_times by trip_id + stop_id
+  const stopTimesSnapshot = await db.collection('stop_times')
+    .where('trip_id', '==', tripId)
+    .where('stop_id', 'in', [startStopId, endStopId])
+    .get();
 
-  if (!startSnap.exists || !endSnap.exists) {
-    throw new Error("Start or end stop not found in this trip.");
+  if (stopTimesSnapshot.empty || stopTimesSnapshot.size < 2) {
+    throw new Error("Start or end stop not found in stop_times for this trip.");
   }
 
-  const start = startSnap.data();
-  const end = endSnap.data();
+  // Step 3: Extract stop_time docs
+  const stopTimes = stopTimesSnapshot.docs.map(doc => doc.data());
+  const start = stopTimes.find(s => s.stop_id === startStopId);
+  const end = stopTimes.find(s => s.stop_id === endStopId);
 
-  const durationSeconds = end.arrivalTimeSeconds - start.arrivalTimeSeconds;
-  const distanceKm = end.shapeDistTraveled - start.shapeDistTraveled;
+  if (!start || !end) {
+    throw new Error("Could not match start or end stop from snapshot.");
+  }
+
+  const startSeq = parseInt(start.stop_sequence, 10);
+  const endSeq = parseInt(end.stop_sequence, 10);
+
+  if (isNaN(startSeq) || isNaN(endSeq)) {
+    throw new Error("Invalid stop sequence data.");
+  }
+
+  if (startSeq >= endSeq) {
+    throw new Error("End stop comes before start stop in sequence.");
+  }
+
+  const arrivalStart = parseTimeToSeconds(start.arrival_time);
+  const arrivalEnd = parseTimeToSeconds(end.arrival_time);
+
+  const durationSeconds = arrivalEnd - arrivalStart;
+  const distanceKm = parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0);
 
   if (durationSeconds <= 0 || distanceKm < 0) {
-    throw new Error("Invalid stop order or data.");
+    throw new Error("Invalid timing or distance order.");
   }
 
   return {
@@ -731,6 +755,14 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     distanceKm: Math.round(distanceKm * 1000) / 1000
   };
 });
+
+// Helper: Convert HH:MM:SS to seconds
+function parseTimeToSeconds(timeStr) {
+  if (!timeStr || typeof timeStr !== 'string') return 0;
+  const [hours, minutes, seconds] = timeStr.split(':').map(Number);
+  return (hours * 3600) + (minutes * 60) + (seconds || 0);
+}
+
 // ---------------- LIVE RIDE TRACKING FUNCTIONS ---------------- //
 
 // Start a new live ride
