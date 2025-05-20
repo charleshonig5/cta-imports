@@ -1116,33 +1116,65 @@ exports.findNearbyTransit = onCall(async (request) => {
   }
 
   const stopsSnapshot = await db.collection('stops').get();
-  const results = [];
+
+  const nearbyStops = [];
 
   for (const doc of stopsSnapshot.docs) {
     const data = doc.data();
-    const stopLat = data.stop_lat;
-    const stopLng = data.stop_lon;
+    const stopLat = data.lat;
+    const stopLng = data.lon;
 
     if (stopLat == null || stopLng == null) continue;
 
     const distance = haversineDistance(lat, lng, stopLat, stopLng);
+    if (distance > radiusMeters) continue;
 
-    if (distance <= radiusMeters) {
-      results.push({
-        stopId: doc.id,
-        stopName: data.stop_name || '',
-        line: data.route_id || '',    // line or route ID (if available)
-        type: data.type || '',        // 'bus' or 'train' (if labeled)
-        distanceMeters: Math.round(distance),
-      });
-    }
+    nearbyStops.push({
+      stopId: doc.id,
+      stopName: data.name || '',
+      lat: stopLat,
+      lon: stopLng,
+      type: data.type || '',
+      lineId: data.lineId || '',
+      lineName: data.lineName || '',
+      distanceMeters: distance,
+    });
   }
 
-  results.sort((a, b) => a.distanceMeters - b.distanceMeters);
+  if (nearbyStops.length === 0) {
+    console.log(`⚠️ No stops found within ${radiusMeters}m of [${lat}, ${lng}]`);
+    return { success: false, message: 'No nearby stops found.' };
+  }
 
-  console.log(`📍 Found ${results.length} stops within ${radiusMeters}m of [${lat}, ${lng}]`);
+  // Sort stops by distance (closest first)
+  nearbyStops.sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+  // Build set of unique lineIds among nearby stops
+  const uniqueLineIds = new Set(nearbyStops.map(stop => stop.lineId));
+
+  // Decide confidence
+  let confidentLineId = null;
+  let confidentLineName = null;
+  let confidenceLevel = 'low';
+
+  if (uniqueLineIds.size === 1) {
+    confidentLineId = nearbyStops[0].lineId;
+    confidentLineName = nearbyStops[0].lineName;
+    confidenceLevel = 'high';
+  }
+
+  const bestStop = nearbyStops[0]; // closest one
+
+  console.log(`📍 Nearby stop found: ${bestStop.stopName} (${bestStop.lineName}) — Confidence: ${confidenceLevel}`);
 
   return {
-    matches: results.slice(0, 5), // return up to 5 closest stops
+    success: true,
+    transitType: bestStop.type,
+    startStopId: bestStop.stopId,
+    startStopName: bestStop.stopName,
+    lineId: confidenceLevel === 'high' ? confidentLineId : null,
+    lineName: confidenceLevel === 'high' ? confidentLineName : null,
+    confidence: confidenceLevel,
+    distanceMeters: Math.round(bestStop.distanceMeters)
   };
 });
