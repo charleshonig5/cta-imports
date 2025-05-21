@@ -1276,3 +1276,64 @@ exports.onUserCreated = onDocumentCreated("users/{userId}", async (event) => {
 
   console.log(`⚙️ Initialized default settings for new user: ${userId}`);
 });
+
+// ---------------- FIND NEARBY END STOP (AUTOFILL END STOP ON RIDE END) ---------------- //
+
+exports.findNearbyEndStop = onCall(async (request) => {
+  const { lat, lng, lineId, radiusMeters = 400 } = request.data;
+
+  if (lat == null || lng == null || !lineId) {
+    throw new functions.https.HttpsError('invalid-argument', 'Missing lat, lng, or lineId');
+  }
+
+  const EARTH_RADIUS = 6371000; // meters
+
+  function haversineDistance(lat1, lon1, lat2, lon2) {
+    const toRad = (x) => (x * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return EARTH_RADIUS * c;
+  }
+
+  const stopsSnapshot = await db.collection('stops').where('lineId', '==', lineId).get();
+  const nearbyStops = [];
+
+  for (const doc of stopsSnapshot.docs) {
+    const data = doc.data();
+    const stopLat = data.lat;
+    const stopLng = data.lon;
+
+    if (stopLat == null || stopLng == null) continue;
+
+    const distance = haversineDistance(lat, lng, stopLat, stopLng);
+    if (distance > radiusMeters) continue;
+
+    nearbyStops.push({
+      stopId: doc.id,
+      stopName: data.name || '',
+      distanceMeters: distance,
+    });
+  }
+
+  if (nearbyStops.length === 0) {
+    console.log(`⚠️ No end stops found within ${radiusMeters}m of [${lat}, ${lng}] for line ${lineId}`);
+    return { success: false, message: 'No nearby end stop found.' };
+  }
+
+  nearbyStops.sort((a, b) => a.distanceMeters - b.distanceMeters);
+  const bestStop = nearbyStops[0];
+
+  console.log(`🏁 End stop auto-filled: ${bestStop.stopName} (${bestStop.stopId}) – ${Math.round(bestStop.distanceMeters)}m`);
+
+  return {
+    success: true,
+    endStopId: bestStop.stopId,
+    endStopName: bestStop.stopName,
+    confidence: 'high',
+    distanceMeters: Math.round(bestStop.distanceMeters)
+  };
+});
