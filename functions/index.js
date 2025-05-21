@@ -1250,5 +1250,5 @@ exports.deleteAccount = onCall(async (request) => {
   await admin.auth().deleteUser(uid);
 
   console.log(`🗑️ Deleted account and all data for user ${uid}`);
-  return { success: true };
+  return true; // ✅ return Boolean instead of object
 });
