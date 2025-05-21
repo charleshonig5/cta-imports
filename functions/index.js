@@ -1210,3 +1210,45 @@ exports.findNearbyTransit = onCall(async (request) => {
     distanceMeters: Math.round(bestStop.distanceMeters)
   };
 });
+
+// ---------------- DELETE ACCOUNT ---------------- //
+
+exports.deleteAccount = onCall(async (request) => {
+  const uid = request.auth?.uid;
+
+  if (!uid) {
+    throw new functions.https.HttpsError('unauthenticated', 'User must be authenticated.');
+  }
+
+  const userRef = db.collection('users').doc(uid);
+
+  // List of known subcollections to clean up
+  const subcollections = [
+    'rides',
+    'achievementsUnlocked',
+    'recentSearches',
+    'fallbackSearches',
+    'stats',
+    'leaderboardStats',
+    'settings',
+    'detailStats',
+    'uiState',
+    'linesUsed'
+  ];
+
+  for (const sub of subcollections) {
+    const snap = await userRef.collection(sub).get();
+    const batch = db.batch();
+    snap.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+  }
+
+  // Delete the main user document
+  await userRef.delete();
+
+  // Delete the Firebase Auth user
+  await admin.auth().deleteUser(uid);
+
+  console.log(`🗑️ Deleted account and all data for user ${uid}`);
+  return { success: true };
+});
