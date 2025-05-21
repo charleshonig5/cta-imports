@@ -1252,3 +1252,27 @@ exports.deleteAccount = onCall(async (request) => {
   console.log(`🗑️ Deleted account and all data for user ${uid}`);
   return true; // ✅ return Boolean instead of object
 });
+
+// ---------------- CREATE DEFAULT SETTINGS ON USER SIGNUP ---------------- //
+
+exports.onUserCreated = onDocumentCreated("users/{userId}", async (event) => {
+  const userId = event.params.userId;
+  const userRef = db.collection("users").doc(userId);
+  const settingsRef = userRef.collection("settings").doc("preferences");
+
+  await settingsRef.set({
+    rideSettings: {
+      distanceUnits: "miles",
+      autofillEnabled: true,
+    },
+    gpsSettings: {
+      backgroundTrackingEnabled: true,
+      locationPermission: true,
+    },
+    notificationSettings: {
+      rideReminders: true,
+    }
+  });
+
+  console.log(`⚙️ Initialized default settings for new user: ${userId}`);
+});
