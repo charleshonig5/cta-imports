@@ -6,6 +6,9 @@ const { onCall } = require("firebase-functions/v2/https");
 const { onObjectFinalized } = require('firebase-functions/v2/storage');
 const { FieldValue } = require('firebase-admin/firestore');
 const sharp = require('sharp'); // Required for profile photo compression
+const leoProfanity = require("leo-profanity");
+const customBannedUsernames = ['admin', 'moderator', 'support', 'cta', 'transitstats', 'fuck'];
+
 
 
 admin.initializeApp();
@@ -1335,5 +1338,37 @@ exports.findNearbyEndStop = onCall(async (request) => {
     endStopName: bestStop.stopName,
     confidence: 'high',
     distanceMeters: Math.round(bestStop.distanceMeters)
+  };
+});
+
+// ---------------- CHECK USERNAME AVAILABILITY ---------------- //
+
+exports.checkUsernameAvailability = onCall(async (request) => {
+  const { username } = request.data;
+
+  if (!username || typeof username !== 'string') {
+    throw new functions.https.HttpsError('invalid-argument', 'Username is required.');
+  }
+
+  const lowerUsername = username.trim().toLowerCase();
+
+  // Check profanity
+  if (leoProfanity.check(lowerUsername) || customBannedUsernames.includes(lowerUsername)) {
+    return {
+      available: false,
+      allowed: false,
+      reason: 'inappropriate',
+    };
+  }
+
+  // Check uniqueness
+  const usersRef = admin.firestore().collection('users');
+  const snapshot = await usersRef.where('username', '==', lowerUsername).limit(1).get();
+
+  const isTaken = !snapshot.empty;
+
+  return {
+    available: !isTaken,
+    allowed: true,
   };
 });
