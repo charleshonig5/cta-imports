@@ -22,98 +22,76 @@ const CATEGORIES = ['rides', 'distance', 'co2'];
 
 // Process leaderboard for a specific time period and category
 async function processLeaderboardCategory(timePeriod, category) {
-  const users = [];
-  const BATCH_SIZE = 500; // Process 500 users at a time
-  let lastDoc = null;
-  let totalUsers = 0;
+  const metricField = `metrics.${timePeriod}_${category}`;
+  
+  // Step 1: Get all users with this metric, sorted by Firestore (much more efficient!)
+  const usersQuery = await db.collection('users')
+    .where(metricField, '>', 0)
+    .orderBy(metricField, 'desc') // Firestore sorts server-side instead of JavaScript
+    .select('metrics') // Only fetch metrics field to reduce data transfer
+    .get();
 
-  // Step 1: Collect all users with metrics in batches
-  do {
-    let query = db.collection('users').limit(BATCH_SIZE);
-    if (lastDoc) {
-      query = query.startAfter(lastDoc);
-    }
+  if (usersQuery.empty) {
+    console.log(`ℹ️ No users found for ${category} leaderboard (${timePeriod})`);
+    return;
+  }
 
-    const usersSnapshot = await query.get();
-    
-    if (usersSnapshot.empty) break;
-
-    usersSnapshot.forEach((doc) => {
-      const data = doc.data();
-      const key = `${timePeriod}_${category}`;
-      if (data.metrics?.[key] != null) {
-        users.push({ 
-          userId: doc.id, 
-          metricValue: data.metrics[key],
-          docRef: doc // Keep reference for efficient updates
-        });
-      }
-    });
-
-    lastDoc = usersSnapshot.docs[usersSnapshot.docs.length - 1];
-    totalUsers += usersSnapshot.size;
-
-    // Add delay to avoid overwhelming Firestore
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-  } while (lastDoc && usersSnapshot.size === BATCH_SIZE);
-
-  // Step 2: Sort users by metric value (in memory - this is the expensive part)
-  users.sort((a, b) => b.metricValue - a.metricValue);
-
-  // Step 3: Process ranks and update users in batches
+  // Step 2: Process ranks and update users in batches (same logic as before)
   const leaderboardDocs = [];
-  const batch = db.batch();
+  let batch = db.batch();
   let batchCount = 0;
   
   let currentRank = 1;
   let prevValue = null;
   let skip = 0;
 
-  for (let i = 0; i < users.length; i++) {
-    const user = users[i];
+  for (let i = 0; i < usersQuery.docs.length; i++) {
+    const userDoc = usersQuery.docs[i];
+    const userId = userDoc.id;
+    const metricValue = userDoc.data().metrics[`${timePeriod}_${category}`];
 
-    // Calculate rank (handle ties)
-    if (user.metricValue === prevValue) {
+    // Calculate rank (handle ties) - exact same logic as before
+    if (metricValue === prevValue) {
       skip++;
     } else {
       currentRank = i + 1;
       skip = 0;
     }
 
-    // Calculate percentile
-    const percentile = users.length === 1 ? 100 : ((users.length - i - 1) / (users.length - 1)) * 100;
+    // Calculate percentile - exact same logic as before
+    const percentile = usersQuery.docs.length === 1 ? 100 : ((usersQuery.docs.length - i - 1) / (usersQuery.docs.length - 1)) * 100;
 
-    // Update user's personal leaderboard stats
+    // Update user's personal leaderboard stats - exact same structure
     const userStatsRef = db
       .collection('users')
-      .doc(user.userId)
+      .doc(userId)
       .collection('leaderboardStats')
       .doc(`${timePeriod}_${category}`);
 
     batch.set(userStatsRef, {
       rank: currentRank,
       percentile: Math.round(percentile * 100) / 100,
-      metricValue: user.metricValue,
+      metricValue: metricValue,
       category,
       timePeriod,
     });
 
-    // Collect top 100 for global leaderboard
+    // Collect top 100 for global leaderboard - exact same logic
     if (i < 100) {
       leaderboardDocs.push({
-        userId: user.userId,
+        userId: userId,
         rank: currentRank,
-        metricValue: user.metricValue,
+        metricValue: metricValue,
       });
     }
 
     batchCount++;
-    prevValue = user.metricValue;
+    prevValue = metricValue;
 
-    // Commit batch every 500 operations (Firestore limit)
+    // Commit batch every 500 operations (Firestore limit) - same as before
     if (batchCount >= 500) {
       await batch.commit();
+      batch = db.batch();
       batchCount = 0;
       // Add small delay between batches
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -125,17 +103,17 @@ async function processLeaderboardCategory(timePeriod, category) {
     await batch.commit();
   }
 
-  // Step 4: Update global leaderboard (top 100)
+  // Step 3: Update global leaderboard (top 100) - exact same structure
   await db
     .collection('leaderboards')
     .doc(`${timePeriod}_${category}`)
     .set({ 
       top100: leaderboardDocs,
       updatedAt: FieldValue.serverTimestamp(),
-      totalUsers: users.length 
+      totalUsers: usersQuery.docs.length 
     });
 
-  console.log(`✅ Updated ${category} leaderboard for ${timePeriod}: ${users.length} users processed`);
+  console.log(`✅ Updated ${category} leaderboard for ${timePeriod}: ${usersQuery.docs.length} users processed`);
 }
 
 // Update frequently-viewed leaderboards hourly
@@ -173,6 +151,7 @@ exports.scheduledLeaderboardUpdateDaily = onSchedule('every 24 hours', async () 
     console.error('❌ Error updating daily leaderboards:', error);
   }
 });
+
 // ---------------- STATS + STREAKS ---------------- //
 
 const transitTypes = ['all', 'bus', 'train'];
