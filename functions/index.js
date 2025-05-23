@@ -839,7 +839,7 @@ exports.sendRideEndReminder = onCall(async (request) => {
 });
 
 // Scheduled function to smartly detect users needing ride reminders
-exports.smartRideNotificationSweep = onSchedule("every 5 minutes", async (event) => {
+exports.smartRideNotificationSweep = onSchedule("every 20 minutes", async (event) => {
   console.log("🚀 Running smart ride notification sweep...");
 
   const snapshot = await db.collection("users").get();
@@ -851,26 +851,12 @@ exports.smartRideNotificationSweep = onSchedule("every 5 minutes", async (event)
 
     if (!userData?.fcmToken) continue; // Skip if no device token
 
-    const lastRideStart = userData.lastRideStartTime?.toMillis?.() || 0;
     const lastMotion = userData.lastMotionTimestamp?.toMillis?.() || 0;
     const isRiding = userData.isCurrentlyRiding || false;
 
-    const hoursSinceLastRide = (now - lastRideStart) / (1000 * 60 * 60);
     const minutesSinceLastMotion = (now - lastMotion) / (1000 * 60);
 
     let sentNotification = false;
-
-    // Logic: Remind user to start a ride
-    if (!isRiding && hoursSinceLastRide > 4) {
-      console.log(`🚲 Sending Start Ride reminder to ${userId}`);
-      await admin.messaging().sendToDevice(userData.fcmToken, {
-        notification: {
-          title: "Ready to Ride?",
-          body: "It looks like it's been a while. Start tracking your next ride!",
-        },
-      });
-      sentNotification = true;
-    }
 
     // Logic: Remind user to end a ride
     if (isRiding && minutesSinceLastMotion > 10) {
