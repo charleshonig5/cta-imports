@@ -152,6 +152,10 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
     }
   }
 
+  // 🔥 NEW: Sync metrics field for leaderboards
+  console.log(`📊 Syncing metrics field for leaderboards: ${userId}`);
+  await syncMetricsForLeaderboards(userId);
+
   console.log(`✅ Stats updated in real-time for user: ${userId}`);
 });
 
@@ -209,8 +213,70 @@ exports.onRideDelete = onDocumentDeleted('users/{userId}/rides/{rideId}', async 
   await updateRecentSelections(userId, null);
   await updateDetailStats(userId); // ✅ Added here
 
+  // 🔥 NEW: Sync metrics field for leaderboards after deletion
+  console.log(`📊 Syncing metrics field for leaderboards after deletion: ${userId}`);
+  await syncMetricsForLeaderboards(userId);
+
   console.log(`🗑️ Ride deleted and stats cleanup completed for user: ${userId}`);
 });
+
+// 🔥 NEW HELPER FUNCTION: Sync Metrics for Leaderboards
+async function syncMetricsForLeaderboards(userId) {
+  const metricsUpdate = {};
+
+  // Map your timePeriods to leaderboard TIME_PERIODS
+  const leaderboardTimePeriods = {
+    'allTime': 'all_time',
+    '1w': '1w', 
+    '1m': '1m',
+    '1y': '1y',
+    'ytd': 'ytd'
+  };
+
+  // Categories that leaderboards track
+  const categories = ['rides', 'distance', 'co2'];
+
+  for (const [statsTimePeriod, leaderboardTimePeriod] of Object.entries(leaderboardTimePeriods)) {
+    // Get stats for 'all' transit types (for leaderboards)
+    const statsDoc = await db
+      .collection('users')
+      .doc(userId)
+      .collection('stats')
+      .doc(`${statsTimePeriod}_all`)
+      .get();
+
+    if (statsDoc.exists) {
+      const stats = statsDoc.data();
+      
+      // Map categories to StatSummary fields
+      for (const category of categories) {
+        let metricValue = 0;
+        
+        switch(category) {
+          case 'rides': 
+            metricValue = stats.totalRides || 0; 
+            break;
+          case 'distance': 
+            metricValue = stats.totalDistance || 0; 
+            break;
+          case 'co2': 
+            metricValue = stats.co2Saved || 0; 
+            break;
+        }
+        
+        metricsUpdate[`${leaderboardTimePeriod}_${category}`] = metricValue;
+      }
+    }
+  }
+
+  // Update main user document with metrics for leaderboards
+  if (Object.keys(metricsUpdate).length > 0) {
+    await db.collection('users').doc(userId).update({
+      metrics: metricsUpdate
+    });
+    console.log(`✅ Metrics synced for user ${userId}:`, metricsUpdate);
+  }
+}
 
 // ---------------- HELPER: RIDE STREAK ---------------- //
 
@@ -300,6 +366,7 @@ async function updateRecentSelections(userId, rideSnap) {
     await ref.set({ items: updated });
   }
 }
+
 // ---------------- UPDATED CALCULATE STATS ---------------- //
 
 async function calculateStats(userId, timePeriod, transitType) {
@@ -435,7 +502,6 @@ async function calculateStats(userId, timePeriod, transitType) {
     longestRideRoute,
   };
 }
-
 // ---------------- HELPER: DETAILED STATS ---------------- //
 
 async function updateDetailStats(userId) {
@@ -485,6 +551,9 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
   let totalCost = 0;
   let lastChargeTime = null;
 
+  // 🔥 NEW: Track per-line costs properly
+  const lineCosts = {};
+
   for (const ride of rides) {
     const {
       line, distanceKm = 0, durationMinutes = 0, startStop, endStop,
@@ -494,9 +563,24 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     const rideStart = new Date(startTime?.toDate ? startTime.toDate() : startTime);
     const cost = type === 'bus' ? 2.25 : 2.5;
 
+    // Calculate total cost (existing logic)
     if (!lastChargeTime || rideStart - lastChargeTime > 2 * 60 * 60 * 1000) {
       totalCost += cost;
       lastChargeTime = rideStart;
+    }
+
+    // 🔥 NEW: Track per-line costs separately
+    if (!lineCosts[line]) {
+      lineCosts[line] = {
+        totalCost: 0,
+        lastChargeTime: null
+      };
+    }
+
+    // Check if this ride on this line should be charged
+    if (!lineCosts[line].lastChargeTime || rideStart - lineCosts[line].lastChargeTime > 2 * 60 * 60 * 1000) {
+      lineCosts[line].totalCost += cost;
+      lineCosts[line].lastChargeTime = rideStart;
     }
 
     if (!lineStats[line]) {
@@ -547,10 +631,11 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     .slice(0, 5)
     .map(([line, data]) => ({ line, co2Kg: data.co2Kg }));
 
+  // 🔥 FIXED: Use actual per-line costs instead of total cost
   const costPerLine = Object.entries(lineStats)
     .map(([line, data]) => ({
       line,
-      costPerMile: data.totalDistanceKm > 0 ? totalCost / (data.totalDistanceKm * 0.621371) : 0
+      costPerMile: data.totalDistanceKm > 0 ? (lineCosts[line]?.totalCost || 0) / (data.totalDistanceKm * 0.621371) : 0
     }))
     .sort((a, b) => b.costPerMile - a.costPerMile)
     .slice(0, 5);
