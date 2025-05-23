@@ -1283,6 +1283,28 @@ exports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async
     }
   }
 });
+
+javascriptexports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async (event) => {
+  // ... your entire onRideCreated function
+});
+
+// 🔥 ADD THE MISSING FUNCTION RIGHT HERE:
+
+exports.onUserUpdated = onDocumentUpdated("users/{userId}", async (event) => {
+  const before = event.data?.before?.data();
+  const after = event.data?.after?.data();
+  const userId = event.params.userId;
+
+  if (!before || !after) return;
+
+  const wasPro = before.isPro || false;
+  const isNowPro = after.isPro || false;
+
+  if (!wasPro && isNowPro) {
+    await unlockAchievement(userId, "pro_status");
+  }
+});
+
 // ---------------- RIDE STREAK ACHIEVEMENTS ---------------- //
 
 exports.onStreakUpdate = onDocumentWritten("users/{userId}/streaks", async (event) => {
