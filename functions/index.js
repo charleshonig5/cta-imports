@@ -244,6 +244,8 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
     await syncMetricsForLeaderboards(userId);
 
     console.log(`✅ Stats updated in real-time for user: ${userId}`);
+    // 🔥 NEW: Check achievements AFTER stats are calculated
+    await checkAndUnlockAchievements(userId);
   } catch (error) {
     console.error(`❌ Error updating stats for user ${event.params.userId}:`, error);
   }
@@ -1190,24 +1192,24 @@ const unlockAchievement = async (userId, achievementId) => {
   }
 };
 
-exports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async (event) => {
-  const userId = event.params.userId;
-  const ride = event.data?.data();
-
-  if (!ride) return;
-
+// 🔥 NEW HELPER FUNCTION: Check and Unlock Achievements
+async function checkAndUnlockAchievements(userId) {
   const userRef = db.collection('users').doc(userId);
   const snapshot = await userRef.collection('rides').get();
   const totalRides = snapshot.size;
 
-  // 🔥 FIXED: Read stats from the correct subcollection location
+  // Read stats from the correct subcollection location
   const statsDoc = await userRef.collection('stats').doc('allTime_all').get();
   const statsData = statsDoc.exists ? statsDoc.data() : {};
   
   const totalDistance = statsData.totalDistance || 0;
-  const totalCO2 = statsData.co2Saved || 0;  // Note: field is co2Saved, not totalCO2Saved
+  const totalCO2 = statsData.co2Saved || 0;
 
   console.log(`🏆 Checking achievements for ${userId}: ${totalRides} rides, ${totalDistance} distance, ${totalCO2} CO2`);
+
+  // Get the latest ride for specialty achievements
+  const latestRideSnapshot = await userRef.collection('rides').orderBy('startTime', 'desc').limit(1).get();
+  const ride = latestRideSnapshot.docs[0]?.data();
 
   // RIDE COUNT achievements
   if (totalRides === 1) await unlockAchievement(userId, "getting_started");
@@ -1231,60 +1233,60 @@ exports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async
   if (totalCO2 >= 100) await unlockAchievement(userId, "green_machine");
   if (totalCO2 >= 250) await unlockAchievement(userId, "sustainability_hero");
 
-  // SPECIALTY ride-based achievements
-  const isLive = ride.wasLiveTracked;
-  const stopCount = ride?.stopCount || 0;
-  const startStop = ride?.startStopId;
-  const endStop = ride?.endStopId;
-  const timestamp = ride?.timestamp?.toDate?.() || new Date(ride?.timestamp?._seconds * 1000 || Date.now());
-  const hour = timestamp.getHours();
+  // SPECIALTY ride-based achievements (only if there's a ride)
+  if (ride) {
+    const isLive = ride.wasLiveTracked;
+    const stopCount = ride?.stopCount || 0;
+    const startStop = ride?.startStopId;
+    const endStop = ride?.endStopId;
+    const timestamp = ride?.timestamp?.toDate?.() || new Date(ride?.timestamp?._seconds * 1000 || Date.now());
+    const hour = timestamp.getHours();
 
-  if (isLive && hour >= 23) await unlockAchievement(userId, "night_owl");
-  if (isLive && hour < 6) await unlockAchievement(userId, "early_bird");
+    if (isLive && hour >= 23) await unlockAchievement(userId, "night_owl");
+    if (isLive && hour < 6) await unlockAchievement(userId, "early_bird");
 
-  if (startStop && endStop && startStop === endStop) {
-    await unlockAchievement(userId, "loop_de_loop");
-  }
-
-  if (stopCount === 1) await unlockAchievement(userId, "one_stop_wonder");
-  if (stopCount >= 15) await unlockAchievement(userId, "scenic_route");
-
-  // LINE COMPLETION ACHIEVEMENTS --------------------
-  const lineId = ride?.lineId;
-  const type = ride?.type;
-
-  if (lineId && type) {
-    const linesUsedRef = db.collection("users").doc(userId).collection("linesUsed").doc("lines");
-    const linesUsedDoc = await linesUsedRef.get();
-    let trainLines = linesUsedDoc.exists ? linesUsedDoc.data().trainLines || [] : [];
-    let busLines = linesUsedDoc.exists ? linesUsedDoc.data().busLines || [] : [];
-
-    const isNewTrainLine = type === "train" && !trainLines.includes(lineId);
-    const isNewBusLine = type === "bus" && !busLines.includes(lineId);
-
-    if (isNewTrainLine) {
-      trainLines.push(lineId);
-      await linesUsedRef.set({ trainLines }, { merge: true });
-
-      const allTrainLines = ["Red", "Blue", "Brown", "Green", "Orange", "Purple", "Pink", "Yellow"];
-      const allUsed = allTrainLines.every(l => trainLines.includes(l));
-      if (allUsed) {
-        await unlockAchievement(userId, "all_aboard");
-      }
+    if (startStop && endStop && startStop === endStop) {
+      await unlockAchievement(userId, "loop_de_loop");
     }
 
-    if (isNewBusLine) {
-      busLines.push(lineId);
-      await linesUsedRef.set({ busLines }, { merge: true });
+    if (stopCount === 1) await unlockAchievement(userId, "one_stop_wonder");
+    if (stopCount >= 15) await unlockAchievement(userId, "scenic_route");
 
-      if (busLines.length >= 120) {
-        await unlockAchievement(userId, "wheels_of_the_city");
+    // LINE COMPLETION ACHIEVEMENTS --------------------
+    const lineId = ride?.lineId;
+    const type = ride?.type;
+
+    if (lineId && type) {
+      const linesUsedRef = db.collection("users").doc(userId).collection("linesUsed").doc("lines");
+      const linesUsedDoc = await linesUsedRef.get();
+      let trainLines = linesUsedDoc.exists ? linesUsedDoc.data().trainLines || [] : [];
+      let busLines = linesUsedDoc.exists ? linesUsedDoc.data().busLines || [] : [];
+
+      const isNewTrainLine = type === "train" && !trainLines.includes(lineId);
+      const isNewBusLine = type === "bus" && !busLines.includes(lineId);
+
+      if (isNewTrainLine) {
+        trainLines.push(lineId);
+        await linesUsedRef.set({ trainLines }, { merge: true });
+
+        const allTrainLines = ["Red", "Blue", "Brown", "Green", "Orange", "Purple", "Pink", "Yellow"];
+        const allUsed = allTrainLines.every(l => trainLines.includes(l));
+        if (allUsed) {
+          await unlockAchievement(userId, "all_aboard");
+        }
+      }
+
+      if (isNewBusLine) {
+        busLines.push(lineId);
+        await linesUsedRef.set({ busLines }, { merge: true });
+
+        if (busLines.length >= 120) {
+          await unlockAchievement(userId, "wheels_of_the_city");
+        }
       }
     }
   }
-});
-
-
+}
 
 exports.onUserUpdated = onDocumentUpdated("users/{userId}", async (event) => {
   const before = event.data?.before?.data();
