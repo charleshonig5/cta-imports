@@ -1284,11 +1284,7 @@ exports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async
   }
 });
 
-javascriptexports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async (event) => {
-  // ... your entire onRideCreated function
-});
 
-// 🔥 ADD THE MISSING FUNCTION RIGHT HERE:
 
 exports.onUserUpdated = onDocumentUpdated("users/{userId}", async (event) => {
   const before = event.data?.before?.data();
