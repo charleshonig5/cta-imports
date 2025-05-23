@@ -1200,10 +1200,14 @@ exports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async
   const snapshot = await userRef.collection('rides').get();
   const totalRides = snapshot.size;
 
-  const userDoc = await userRef.get();
-  const userData = userDoc.data();
-  const totalDistance = userData?.stats?.totalDistance || 0;
-  const totalCO2 = userData?.stats?.totalCO2Saved || 0;
+  // 🔥 FIXED: Read stats from the correct subcollection location
+  const statsDoc = await userRef.collection('stats').doc('allTime_all').get();
+  const statsData = statsDoc.exists ? statsDoc.data() : {};
+  
+  const totalDistance = statsData.totalDistance || 0;
+  const totalCO2 = statsData.co2Saved || 0;  // Note: field is co2Saved, not totalCO2Saved
+
+  console.log(`🏆 Checking achievements for ${userId}: ${totalRides} rides, ${totalDistance} distance, ${totalCO2} CO2`);
 
   // RIDE COUNT achievements
   if (totalRides === 1) await unlockAchievement(userId, "getting_started");
@@ -1279,22 +1283,6 @@ exports.onRideCreated = onDocumentCreated("users/{userId}/rides/{rideId}", async
     }
   }
 });
-
-exports.onUserUpdated = onDocumentUpdated("users/{userId}", async (event) => {
-  const before = event.data?.before?.data();
-  const after = event.data?.after?.data();
-  const userId = event.params.userId;
-
-  if (!before || !after) return;
-
-  const wasPro = before.isPro || false;
-  const isNowPro = after.isPro || false;
-
-  if (!wasPro && isNowPro) {
-    await unlockAchievement(userId, "pro_status");
-  }
-});
-
 // ---------------- RIDE STREAK ACHIEVEMENTS ---------------- //
 
 exports.onStreakUpdate = onDocumentWritten("users/{userId}/streaks", async (event) => {
