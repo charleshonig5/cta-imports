@@ -765,6 +765,27 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
   };
 }
 
+// ---------------- HELPER: DETAILED STATS ---------------- //
+
+async function updateDetailStats(userId) {
+  for (const timePeriod of timePeriods) {
+    for (const transitType of transitTypes) {
+      const details = await calculateDetailStats(userId, timePeriod, transitType);
+      await db
+        .collection('users')
+        .doc(userId)
+        .collection('detailStats')
+        .doc(`${timePeriod}_${transitType}`)
+        .set({
+          ...details,
+          timePeriod,
+          transitType,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+    }
+  }
+}
+
 // ---------------- PUSH NOTIFICATIONS ---------------- //
 
 // Send notification suggesting the user to start a ride
