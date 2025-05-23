@@ -1355,7 +1355,6 @@ exports.onUserCreated = onDocumentCreated("users/{userId}", async (event) => {
     },
     gpsSettings: {
       backgroundTrackingEnabled: true,
-      locationPermission: true,
     },
     notificationSettings: {
       rideReminders: true,
@@ -1363,6 +1362,16 @@ exports.onUserCreated = onDocumentCreated("users/{userId}", async (event) => {
   });
 
   console.log(`⚙️ Initialized default settings for new user: ${userId}`);
+});
+
+// 🔥 ADD THIS RIGHT AFTER onUserCreated
+exports.onSettingsUpdated = onDocumentUpdated("users/{userId}/settings/preferences", async (event) => {
+  const before = event.data?.before?.data();
+  const after = event.data?.after?.data();
+  
+  if (before?.rideSettings?.distanceUnits !== after?.rideSettings?.distanceUnits) {
+    console.log(`📏 User ${event.params.userId} changed units to: ${after.rideSettings.distanceUnits}`);
+  }
 });
 
 // ---------------- FIND NEARBY END STOP (AUTOFILL END STOP ON RIDE END) ---------------- //
