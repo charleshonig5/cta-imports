@@ -95,7 +95,7 @@ const timePeriods = ['allTime', '1w', '1m', '1y', 'ytd'];
 /**
  * 🔄 Update User Stats on Ride Write (Create or Update)
  */
-exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
+exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (event) => {
   const rideSnap = event.data?.after;
   if (!rideSnap) return;
 
@@ -158,7 +158,7 @@ exports.onRideWrite = onDocumentWritten('rides/{rideId}', async (event) => {
 /**
  * 🗑️ Cleanup and Update User Stats on Ride Delete
  */
-exports.onRideDelete = onDocumentDeleted('rides/{rideId}', async (event) => {
+exports.onRideDelete = onDocumentDeleted('users/{userId}/rides/{rideId}', async (event) => {
   const deletedRide = event.data?.data();
   if (!deletedRide) return;
 
