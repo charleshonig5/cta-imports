@@ -20,72 +20,158 @@ const storage = admin.storage();
 const TIME_PERIODS = ['all_time', '1w', '1m', '1y', 'ytd'];
 const CATEGORIES = ['rides', 'distance', 'co2'];
 
-exports.scheduledLeaderboardUpdate = onSchedule('every 15 minutes', async () => {
-  for (const timePeriod of TIME_PERIODS) {
-    for (const category of CATEGORIES) {
-      const usersSnapshot = await db.collection('users').get();
-      const users = [];
+// Process leaderboard for a specific time period and category
+async function processLeaderboardCategory(timePeriod, category) {
+  const users = [];
+  const BATCH_SIZE = 500; // Process 500 users at a time
+  let lastDoc = null;
+  let totalUsers = 0;
 
-      usersSnapshot.forEach((doc) => {
-        const data = doc.data();
-        const key = `${timePeriod}_${category}`;
-        if (data.metrics?.[key] != null) {
-          users.push({ userId: doc.id, metricValue: data.metrics[key] });
-        }
-      });
+  // Step 1: Collect all users with metrics in batches
+  do {
+    let query = db.collection('users').limit(BATCH_SIZE);
+    if (lastDoc) {
+      query = query.startAfter(lastDoc);
+    }
 
-      users.sort((a, b) => b.metricValue - a.metricValue);
+    const usersSnapshot = await query.get();
+    
+    if (usersSnapshot.empty) break;
 
-      const leaderboardDocs = [];
-      const totalUsers = users.length;
-      let currentRank = 1;
-      let prevValue = null;
-      let skip = 0;
-
-      for (let i = 0; i < users.length; i++) {
-        const user = users[i];
-
-        if (user.metricValue === prevValue) {
-          skip++;
-        } else {
-          currentRank = i + 1 + skip;
-          skip = 0;
-        }
-
-        const percentile = totalUsers === 1 ? 100 : ((totalUsers - i - 1) / (totalUsers - 1)) * 100;
-
-        await db
-          .collection('users')
-          .doc(user.userId)
-          .collection('leaderboardStats')
-          .doc(`${timePeriod}_${category}`)
-          .set({
-            rank: currentRank,
-            percentile: Math.round(percentile * 100) / 100,
-            metricValue: user.metricValue,
-            category,
-            timePeriod,
-          });
-
-        if (i < 100) {
-          leaderboardDocs.push({
-            userId: user.userId,
-            rank: currentRank,
-            metricValue: user.metricValue,
-          });
-        }
-
-        prevValue = user.metricValue;
+    usersSnapshot.forEach((doc) => {
+      const data = doc.data();
+      const key = `${timePeriod}_${category}`;
+      if (data.metrics?.[key] != null) {
+        users.push({ 
+          userId: doc.id, 
+          metricValue: data.metrics[key],
+          docRef: doc // Keep reference for efficient updates
+        });
       }
+    });
 
-      await db
-        .collection('leaderboards')
-        .doc(`${timePeriod}_${category}`)
-        .set({ top100: leaderboardDocs });
+    lastDoc = usersSnapshot.docs[usersSnapshot.docs.length - 1];
+    totalUsers += usersSnapshot.size;
+
+    // Add delay to avoid overwhelming Firestore
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+  } while (lastDoc && usersSnapshot.size === BATCH_SIZE);
+
+  // Step 2: Sort users by metric value (in memory - this is the expensive part)
+  users.sort((a, b) => b.metricValue - a.metricValue);
+
+  // Step 3: Process ranks and update users in batches
+  const leaderboardDocs = [];
+  const batch = db.batch();
+  let batchCount = 0;
+  
+  let currentRank = 1;
+  let prevValue = null;
+  let skip = 0;
+
+  for (let i = 0; i < users.length; i++) {
+    const user = users[i];
+
+    // Calculate rank (handle ties)
+    if (user.metricValue === prevValue) {
+      skip++;
+    } else {
+      currentRank = i + 1;
+      skip = 0;
+    }
+
+    // Calculate percentile
+    const percentile = users.length === 1 ? 100 : ((users.length - i - 1) / (users.length - 1)) * 100;
+
+    // Update user's personal leaderboard stats
+    const userStatsRef = db
+      .collection('users')
+      .doc(user.userId)
+      .collection('leaderboardStats')
+      .doc(`${timePeriod}_${category}`);
+
+    batch.set(userStatsRef, {
+      rank: currentRank,
+      percentile: Math.round(percentile * 100) / 100,
+      metricValue: user.metricValue,
+      category,
+      timePeriod,
+    });
+
+    // Collect top 100 for global leaderboard
+    if (i < 100) {
+      leaderboardDocs.push({
+        userId: user.userId,
+        rank: currentRank,
+        metricValue: user.metricValue,
+      });
+    }
+
+    batchCount++;
+    prevValue = user.metricValue;
+
+    // Commit batch every 500 operations (Firestore limit)
+    if (batchCount >= 500) {
+      await batch.commit();
+      batchCount = 0;
+      // Add small delay between batches
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
-  console.log('🏆 Leaderboards and personal ranks updated.');
+  // Commit any remaining operations
+  if (batchCount > 0) {
+    await batch.commit();
+  }
+
+  // Step 4: Update global leaderboard (top 100)
+  await db
+    .collection('leaderboards')
+    .doc(`${timePeriod}_${category}`)
+    .set({ 
+      top100: leaderboardDocs,
+      updatedAt: FieldValue.serverTimestamp(),
+      totalUsers: users.length 
+    });
+
+  console.log(`✅ Updated ${category} leaderboard for ${timePeriod}: ${users.length} users processed`);
+}
+
+// Update frequently-viewed leaderboards hourly
+exports.scheduledLeaderboardUpdateHourly = onSchedule('every 1 hours', async () => {
+  try {
+    // Only update weekly and monthly leaderboards (users check these most)
+    const quickPeriods = ['1w', '1m'];
+    
+    for (const timePeriod of quickPeriods) {
+      for (const category of CATEGORIES) {
+        await processLeaderboardCategory(timePeriod, category);
+      }
+    }
+    
+    console.log('🏆 Hourly leaderboards updated (1w, 1m).');
+  } catch (error) {
+    console.error('❌ Error updating hourly leaderboards:', error);
+  }
+});
+
+// Update long-term leaderboards daily
+exports.scheduledLeaderboardUpdateDaily = onSchedule('every 24 hours', async () => {
+  try {
+    // Update yearly and all-time leaderboards (less frequently checked)
+    const slowPeriods = ['1y', 'all_time', 'ytd'];
+    
+    for (const timePeriod of slowPeriods) {
+      for (const category of CATEGORIES) {
+        await processLeaderboardCategory(timePeriod, category);
+      }
+    }
+    
+    console.log('🏆 Daily leaderboards updated (1y, all_time, ytd).');
+  } catch (error) {
+    console.error('❌ Error updating daily leaderboards:', error);
+  }
 });
 // ---------------- STATS + STREAKS ---------------- //
 
@@ -96,128 +182,136 @@ const timePeriods = ['allTime', '1w', '1m', '1y', 'ytd'];
  * 🔄 Update User Stats on Ride Write (Create or Update)
  */
 exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (event) => {
-  const rideSnap = event.data?.after;
-  if (!rideSnap) return;
+  try {
+    const rideSnap = event.data?.after;
+    if (!rideSnap) return;
 
-  const userId = rideSnap.get('userId');
-  if (!userId) return;
+    const userId = rideSnap.get('userId');
+    if (!userId) return;
 
-  const isManual = rideSnap.get('manualEntry');
-  const inProgress = rideSnap.get('inProgress') || false;
-  const startTime = rideSnap.get('startTime');
+    const isManual = rideSnap.get('manualEntry');
+    const inProgress = rideSnap.get('inProgress') || false;
+    const startTime = rideSnap.get('startTime');
 
-  if (inProgress) {
-    console.log(`🚧 Ride in progress, skipping stats update for now: ${userId}`);
-    return;
-  }
-
-  if (!isManual && startTime) {
-    await handleStreakUpdate(userId, startTime);
-  }
-
-  await updateRecentSelections(userId, rideSnap);
-  await updateDetailStats(userId); // ✅ Added here
-
-  // Loop through all time periods and transit types and update stats
-  for (const timePeriod of timePeriods) {
-    for (const transitType of transitTypes) {
-      const stats = await calculateStats(userId, timePeriod, transitType);
-
-      await db
-        .collection('users')
-        .doc(userId)
-        .collection('stats')
-        .doc(`${timePeriod}_${transitType}`)
-        .set({
-          totalDistance: stats.totalDistance,
-          averageDistancePerWeek: stats.averageDistancePerWeek,
-          totalTimeMinutes: stats.totalTimeMinutes,
-          totalTimeHours: stats.totalTimeHours,
-          totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
-          totalRides: stats.totalRides,
-          rideCountChange: stats.rideCountChange || 0, // 🚀 New Stat Added Here
-          totalCost: stats.totalCost,
-          costPerMile: stats.costPerMile,
-          co2Saved: stats.co2Saved,
-          co2Change: stats.co2Change || 0, // 🚀 New Stat Added Here
-          mostUsedLine: stats.mostUsedLine,
-          mostUsedLineCount: stats.mostUsedLineCount,
-          longestRideMiles: stats.longestRideMiles,
-          longestRideLine: stats.longestRideLine,
-          longestRideRoute: stats.longestRideRoute,
-          timePeriod,
-          transitType,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
+    if (inProgress) {
+      console.log(`🚧 Ride in progress, skipping stats update for now: ${userId}`);
+      return;
     }
+
+    if (!isManual && startTime) {
+      await handleStreakUpdate(userId, startTime);
+    }
+
+    await updateRecentSelections(userId, rideSnap);
+    await updateDetailStats(userId); // ✅ Added here
+
+    // Loop through all time periods and transit types and update stats
+    for (const timePeriod of timePeriods) {
+      for (const transitType of transitTypes) {
+        const stats = await calculateStats(userId, timePeriod, transitType);
+
+        await db
+          .collection('users')
+          .doc(userId)
+          .collection('stats')
+          .doc(`${timePeriod}_${transitType}`)
+          .set({
+            totalDistance: stats.totalDistance,
+            averageDistancePerWeek: stats.averageDistancePerWeek,
+            totalTimeMinutes: stats.totalTimeMinutes,
+            totalTimeHours: stats.totalTimeHours,
+            totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
+            totalRides: stats.totalRides,
+            rideCountChange: stats.rideCountChange || 0, // 🚀 New Stat Added Here
+            totalCost: stats.totalCost,
+            costPerMile: stats.costPerMile,
+            co2Saved: stats.co2Saved,
+            co2Change: stats.co2Change || 0, // 🚀 New Stat Added Here
+            mostUsedLine: stats.mostUsedLine,
+            mostUsedLineCount: stats.mostUsedLineCount,
+            longestRideMiles: stats.longestRideMiles,
+            longestRideLine: stats.longestRideLine,
+            longestRideRoute: stats.longestRideRoute,
+            timePeriod,
+            transitType,
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+      }
+    }
+
+    // 🔥 NEW: Sync metrics field for leaderboards
+    console.log(`📊 Syncing metrics field for leaderboards: ${userId}`);
+    await syncMetricsForLeaderboards(userId);
+
+    console.log(`✅ Stats updated in real-time for user: ${userId}`);
+  } catch (error) {
+    console.error(`❌ Error updating stats for user ${event.params.userId}:`, error);
   }
-
-  // 🔥 NEW: Sync metrics field for leaderboards
-  console.log(`📊 Syncing metrics field for leaderboards: ${userId}`);
-  await syncMetricsForLeaderboards(userId);
-
-  console.log(`✅ Stats updated in real-time for user: ${userId}`);
 });
 
 /**
  * 🗑️ Cleanup and Update User Stats on Ride Delete
  */
 exports.onRideDelete = onDocumentDeleted('users/{userId}/rides/{rideId}', async (event) => {
-  const deletedRide = event.data?.data();
-  if (!deletedRide) return;
+  try {
+    const deletedRide = event.data?.data();
+    if (!deletedRide) return;
 
-  const userId = deletedRide.userId;
-  if (!userId) return;
+    const userId = deletedRide.userId;
+    if (!userId) return;
 
-  const inProgress = deletedRide.inProgress || false;
+    const inProgress = deletedRide.inProgress || false;
 
-  if (inProgress) {
-    console.log(`🗑️ In-progress ride deleted, skipping stats cleanup: ${userId}`);
-    return;
-  }
-
-  // Loop through all time periods and transit types and update stats after deletion
-  for (const timePeriod of timePeriods) {
-    for (const transitType of transitTypes) {
-      const stats = await calculateStats(userId, timePeriod, transitType);
-
-      await db
-        .collection('users')
-        .doc(userId)
-        .collection('stats')
-        .doc(`${timePeriod}_${transitType}`)
-        .set({
-          totalDistance: stats.totalDistance,
-          averageDistancePerWeek: stats.averageDistancePerWeek,
-          totalTimeMinutes: stats.totalTimeMinutes,
-          totalTimeHours: stats.totalTimeHours,
-          totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
-          totalRides: stats.totalRides,
-          rideCountChange: stats.rideCountChange || 0, // 🚀 Monthly change patched here
-          totalCost: stats.totalCost,
-          costPerMile: stats.costPerMile,
-          co2Saved: stats.co2Saved,
-          co2Change: stats.co2Change || 0, // 🚀 Monthly change patched here
-          mostUsedLine: stats.mostUsedLine,
-          mostUsedLineCount: stats.mostUsedLineCount,
-          longestRideMiles: stats.longestRideMiles,
-          longestRideLine: stats.longestRideLine,
-          longestRideRoute: stats.longestRideRoute,
-          timePeriod,
-          transitType,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
+    if (inProgress) {
+      console.log(`🗑️ In-progress ride deleted, skipping stats cleanup: ${userId}`);
+      return;
     }
+
+    // Loop through all time periods and transit types and update stats after deletion
+    for (const timePeriod of timePeriods) {
+      for (const transitType of transitTypes) {
+        const stats = await calculateStats(userId, timePeriod, transitType);
+
+        await db
+          .collection('users')
+          .doc(userId)
+          .collection('stats')
+          .doc(`${timePeriod}_${transitType}`)
+          .set({
+            totalDistance: stats.totalDistance,
+            averageDistancePerWeek: stats.averageDistancePerWeek,
+            totalTimeMinutes: stats.totalTimeMinutes,
+            totalTimeHours: stats.totalTimeHours,
+            totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
+            totalRides: stats.totalRides,
+            rideCountChange: stats.rideCountChange || 0, // 🚀 Monthly change patched here
+            totalCost: stats.totalCost,
+            costPerMile: stats.costPerMile,
+            co2Saved: stats.co2Saved,
+            co2Change: stats.co2Change || 0, // 🚀 Monthly change patched here
+            mostUsedLine: stats.mostUsedLine,
+            mostUsedLineCount: stats.mostUsedLineCount,
+            longestRideMiles: stats.longestRideMiles,
+            longestRideLine: stats.longestRideLine,
+            longestRideRoute: stats.longestRideRoute,
+            timePeriod,
+            transitType,
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+      }
+    }
+
+    await updateRecentSelections(userId, null);
+    await updateDetailStats(userId); // ✅ Added here
+
+    // 🔥 NEW: Sync metrics field for leaderboards after deletion
+    console.log(`📊 Syncing metrics field for leaderboards after deletion: ${userId}`);
+    await syncMetricsForLeaderboards(userId);
+
+    console.log(`🗑️ Ride deleted and stats cleanup completed for user: ${userId}`);
+  } catch (error) {
+    console.error(`❌ Error cleaning up stats after ride deletion for user ${event.params.userId}:`, error);
   }
-
-  await updateRecentSelections(userId, null);
-  await updateDetailStats(userId); // ✅ Added here
-
-  // 🔥 NEW: Sync metrics field for leaderboards after deletion
-  console.log(`📊 Syncing metrics field for leaderboards after deletion: ${userId}`);
-  await syncMetricsForLeaderboards(userId);
-
-  console.log(`🗑️ Ride deleted and stats cleanup completed for user: ${userId}`);
 });
 
 // 🔥 NEW HELPER FUNCTION: Sync Metrics for Leaderboards
@@ -367,14 +461,14 @@ async function updateRecentSelections(userId, rideSnap) {
   }
 }
 
-// ---------------- UPDATED CALCULATE STATS ---------------- //
+// ---------------- UPDATED CALCULATE STATS WITH NULL CHECKS ---------------- //
 
 async function calculateStats(userId, timePeriod, transitType) {
-  let ridesQuery = db.collection('rides').where('userId', '==', userId);
+  // Query and filtering code stays the same...
+  let ridesQuery = db.collection('users').doc(userId).collection('rides');
   const now = new Date();
   let startDate;
 
-  // Set startDate based on time period
   switch (timePeriod) {
     case '1w': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
     case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
@@ -387,7 +481,6 @@ async function calculateStats(userId, timePeriod, transitType) {
     ridesQuery = ridesQuery.where('startTime', '>=', startDate);
   }
 
-  // Fetch and filter rides
   const ridesSnapshot = await ridesQuery.get();
   const rides = ridesSnapshot.docs
     .map((doc) => doc.data())
@@ -395,6 +488,12 @@ async function calculateStats(userId, timePeriod, transitType) {
       (transitType === 'all' || ride.type === transitType) && 
       !ride.inProgress 
     );
+
+  rides.sort((a, b) => {
+    const timeA = new Date(a.startTime?.toDate ? a.startTime.toDate() : a.startTime);
+    const timeB = new Date(b.startTime?.toDate ? b.startTime.toDate() : b.startTime);
+    return timeA - timeB;
+  });
 
   let totalDistance = 0;
   let totalTime = 0;
@@ -408,10 +507,11 @@ async function calculateStats(userId, timePeriod, transitType) {
   for (const ride of rides) {
     const { distanceKm, durationMinutes, startTime, type, line, startStop, endStop } = ride;
 
-    totalDistance += distanceKm;
-    totalTime += durationMinutes;
+    // 🔥 NULL CHECK FIXES: Add || 0 defaults to prevent NaN
+    totalDistance += (distanceKm || 0);
+    totalTime += (durationMinutes || 0);
 
-    const rideStart = new Date(startTime.toDate ? startTime.toDate() : startTime);
+    const rideStart = new Date(startTime?.toDate ? startTime.toDate() : startTime);
     const cost = type === 'bus' ? 2.25 : 2.5;
 
     if (!lastChargeTime || rideStart.getTime() - lastChargeTime.getTime() > 2 * 60 * 60 * 1000) {
@@ -419,13 +519,18 @@ async function calculateStats(userId, timePeriod, transitType) {
       lastChargeTime = rideStart;
     }
 
-    co2Saved += distanceKm * (type === 'bus' ? 0.15 : 0.2);
+    // 🔥 NULL CHECK FIX: Ensure distanceKm exists before CO2 calculation
+    co2Saved += (distanceKm || 0) * (type === 'bus' ? 0.15 : 0.2);
 
-    if (!longestRide || distanceKm > longestRide.distanceKm) {
-      longestRide = { distanceKm, line, startStop, endStop };
+    // 🔥 NULL CHECK FIX: Ensure distanceKm exists before longest ride comparison
+    if (!longestRide || (distanceKm || 0) > (longestRide.distanceKm || 0)) {
+      longestRide = { distanceKm: (distanceKm || 0), line, startStop, endStop };
     }
 
-    if (line) lineCounts[line] = (lineCounts[line] || 0) + 1;
+    // 🔥 NULL CHECK FIX: Only count lines that actually exist
+    if (line && line.trim()) {
+      lineCounts[line] = (lineCounts[line] || 0) + 1;
+    }
   }
 
   const mostUsedLineEntry = Object.entries(lineCounts).sort((a, b) => b[1] - a[1])[0];
@@ -436,7 +541,6 @@ async function calculateStats(userId, timePeriod, transitType) {
   const totalTimeHours = Math.floor(totalTime / 60);
   const totalTimeRemainingMinutes = totalTime % 60;
 
-  // Calculate the average distance per week
   let averageDistancePerWeek = 0;
   if (startDate) {
     const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
@@ -451,33 +555,31 @@ async function calculateStats(userId, timePeriod, transitType) {
     const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
-    // Ride Count Change
-    const ridesLastMonthSnapshot = await db.collection('rides')
-      .where('userId', '==', userId)
+    const ridesLastMonthSnapshot = await db.collection('users').doc(userId).collection('rides')
       .where('startTime', '>=', startOfLastMonth)
       .where('startTime', '<', startOfThisMonth)
       .get();
 
-    const ridesLastMonth = ridesLastMonthSnapshot.docs
+    const lastMonthRides = ridesLastMonthSnapshot.docs
       .map((doc) => doc.data())
       .filter((ride) => 
         (transitType === 'all' || ride.type === transitType) &&
         !ride.inProgress
-      ).length;
+      );
 
+    const ridesLastMonth = lastMonthRides.length;
     rideCountChange = totalRides - ridesLastMonth;
 
-    // CO₂ Saved Change
-    const co2LastMonth = ridesLastMonthSnapshot.docs
-      .map((doc) => doc.data())
+    // 🔥 NULL CHECK FIX: Already fixed this one earlier
+    const co2LastMonth = lastMonthRides
       .reduce((sum, ride) => 
-        sum + ride.distanceKm * (ride.type === 'bus' ? 0.15 : 0.2), 0
+        sum + (ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2), 0
       );
 
     co2Change = co2Saved - co2LastMonth;
   }
 
-  const longestRideMiles = longestRide ? longestRide.distanceKm * 0.621371 : 0;
+  const longestRideMiles = longestRide ? (longestRide.distanceKm || 0) * 0.621371 : 0;
   const longestRideLine = longestRide?.line || null;
   const longestRideRoute = longestRide?.startStop && longestRide?.endStop
     ? `${longestRide.startStop} → ${longestRide.endStop}`
@@ -502,29 +604,12 @@ async function calculateStats(userId, timePeriod, transitType) {
     longestRideRoute,
   };
 }
-// ---------------- HELPER: DETAILED STATS ---------------- //
 
-async function updateDetailStats(userId) {
-  for (const timePeriod of timePeriods) {
-    for (const transitType of transitTypes) {
-      const details = await calculateDetailStats(userId, timePeriod, transitType);
-      await db
-        .collection('users')
-        .doc(userId)
-        .collection('detailStats')
-        .doc(`${timePeriod}_${transitType}`)
-        .set({
-          ...details,
-          timePeriod,
-          transitType,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-    }
-  }
-}
+// ---------------- HELPER: DETAILED STATS WITH NULL CHECKS ---------------- //
 
 async function calculateDetailStats(userId, timePeriod, transitType) {
-  let ridesQuery = db.collection('rides').where('userId', '==', userId);
+  // Query setup stays the same...
+  let ridesQuery = db.collection('users').doc(userId).collection('rides');
   const now = new Date();
   let startDate;
 
@@ -545,13 +630,17 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     .map(doc => doc.data())
     .filter(ride => !ride.inProgress && (transitType === 'all' || ride.type === transitType));
 
+  rides.sort((a, b) => {
+    const timeA = new Date(a.startTime?.toDate ? a.startTime.toDate() : a.startTime);
+    const timeB = new Date(b.startTime?.toDate ? b.startTime.toDate() : b.startTime);
+    return timeA - timeB;
+  });
+
   const lineStats = {};
   const stopVisits = {};
   const longestRides = [];
   let totalCost = 0;
   let lastChargeTime = null;
-
-  // 🔥 NEW: Track per-line costs properly
   const lineCosts = {};
 
   for (const ride of rides) {
@@ -563,13 +652,14 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     const rideStart = new Date(startTime?.toDate ? startTime.toDate() : startTime);
     const cost = type === 'bus' ? 2.25 : 2.5;
 
-    // Calculate total cost (existing logic)
     if (!lastChargeTime || rideStart - lastChargeTime > 2 * 60 * 60 * 1000) {
       totalCost += cost;
       lastChargeTime = rideStart;
     }
 
-    // 🔥 NEW: Track per-line costs separately
+    // 🔥 NULL CHECK FIX: Only process rides with valid line data
+    if (!line || !line.trim()) continue;
+
     if (!lineCosts[line]) {
       lineCosts[line] = {
         totalCost: 0,
@@ -577,7 +667,6 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
       };
     }
 
-    // Check if this ride on this line should be charged
     if (!lineCosts[line].lastChargeTime || rideStart - lineCosts[line].lastChargeTime > 2 * 60 * 60 * 1000) {
       lineCosts[line].totalCost += cost;
       lineCosts[line].lastChargeTime = rideStart;
@@ -592,25 +681,31 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
       };
     }
 
-    lineStats[line].totalDistanceKm += distanceKm;
-    lineStats[line].totalMinutes += durationMinutes;
+    // 🔥 NULL CHECK FIXES: Ensure values exist before adding
+    lineStats[line].totalDistanceKm += (distanceKm || 0);
+    lineStats[line].totalMinutes += (durationMinutes || 0);
     lineStats[line].rideCount += 1;
-    lineStats[line].co2Kg += distanceKm * (type === 'bus' ? 0.15 : 0.2);
+    lineStats[line].co2Kg += (distanceKm || 0) * (type === 'bus' ? 0.15 : 0.2);
 
     if (!stopVisits[line]) stopVisits[line] = {};
-    if (startStop) stopVisits[line][startStop] = (stopVisits[line][startStop] || 0) + 1;
-    if (endStop) stopVisits[line][endStop] = (stopVisits[line][endStop] || 0) + 1;
+    if (startStop && startStop.trim()) {
+      stopVisits[line][startStop] = (stopVisits[line][startStop] || 0) + 1;
+    }
+    if (endStop && endStop.trim()) {
+      stopVisits[line][endStop] = (stopVisits[line][endStop] || 0) + 1;
+    }
 
     longestRides.push({
       rideId,
       line,
-      distanceKm,
+      distanceKm: (distanceKm || 0),
       startStop,
       endStop,
-      stopCount
+      stopCount: (stopCount || 0)
     });
   }
 
+  // Rest of the function stays exactly the same...
   const topByDistance = Object.entries(lineStats)
     .sort((a, b) => b[1].totalDistanceKm - a[1].totalDistanceKm)
     .slice(0, 5)
@@ -631,7 +726,6 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     .slice(0, 5)
     .map(([line, data]) => ({ line, co2Kg: data.co2Kg }));
 
-  // 🔥 FIXED: Use actual per-line costs instead of total cost
   const costPerLine = Object.entries(lineStats)
     .map(([line, data]) => ({
       line,
@@ -1069,7 +1163,6 @@ const unlockAchievement = async (userId, achievementId) => {
       name,
       description,
       category,
-      imageUrl,
       shown: false,
       unlockedAt: FieldValue.serverTimestamp()
     });
