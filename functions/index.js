@@ -182,48 +182,16 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
     }
 
     await updateRecentSelections(userId, rideSnap);
-    await updateDetailStats(userId); // ✅ Added here
 
-    // Loop through all time periods and transit types and update stats
-    for (const timePeriod of timePeriods) {
-      for (const transitType of transitTypes) {
-        const stats = await calculateStats(userId, timePeriod, transitType);
+    // 🚀 OPTIMIZED: Update ALL stats efficiently with single read
+    await updateAllStatsAndDetailsEfficiently(userId);
 
-        await db
-          .collection('users')
-          .doc(userId)
-          .collection('stats')
-          .doc(`${timePeriod}_${transitType}`)
-          .set({
-            totalDistance: stats.totalDistance,
-            averageDistancePerWeek: stats.averageDistancePerWeek,
-            totalTimeMinutes: stats.totalTimeMinutes,
-            totalTimeHours: stats.totalTimeHours,
-            totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
-            totalRides: stats.totalRides,
-            rideCountChange: stats.rideCountChange || 0, // 🚀 New Stat Added Here
-            totalCost: stats.totalCost,
-            costPerMile: stats.costPerMile,
-            co2Saved: stats.co2Saved,
-            co2Change: stats.co2Change || 0, // 🚀 New Stat Added Here
-            mostUsedLine: stats.mostUsedLine,
-            mostUsedLineCount: stats.mostUsedLineCount,
-            longestRideMiles: stats.longestRideMiles,
-            longestRideLine: stats.longestRideLine,
-            longestRideRoute: stats.longestRideRoute,
-            timePeriod,
-            transitType,
-            updatedAt: FieldValue.serverTimestamp(),
-          });
-      }
-    }
-
-    // 🔥 NEW: Sync metrics field for leaderboards
+    // 🔥 Sync metrics field for leaderboards
     console.log(`📊 Syncing metrics field for leaderboards: ${userId}`);
     await syncMetricsForLeaderboards(userId);
 
-    console.log(`✅ Stats updated in real-time for user: ${userId}`);
-    // 🔥 NEW: Check achievements AFTER stats are calculated
+    console.log(`✅ Stats updated efficiently for user: ${userId}`);
+    // 🔥 Check achievements AFTER stats are calculated
     await checkAndUnlockAchievements(userId);
   } catch (error) {
     console.error(`❌ Error updating stats for user ${event.params.userId}:`, error);
@@ -248,54 +216,118 @@ exports.onRideDelete = onDocumentDeleted('users/{userId}/rides/{rideId}', async 
       return;
     }
 
-    // Loop through all time periods and transit types and update stats after deletion
-    for (const timePeriod of timePeriods) {
-      for (const transitType of transitTypes) {
-        const stats = await calculateStats(userId, timePeriod, transitType);
-
-        await db
-          .collection('users')
-          .doc(userId)
-          .collection('stats')
-          .doc(`${timePeriod}_${transitType}`)
-          .set({
-            totalDistance: stats.totalDistance,
-            averageDistancePerWeek: stats.averageDistancePerWeek,
-            totalTimeMinutes: stats.totalTimeMinutes,
-            totalTimeHours: stats.totalTimeHours,
-            totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
-            totalRides: stats.totalRides,
-            rideCountChange: stats.rideCountChange || 0, // 🚀 Monthly change patched here
-            totalCost: stats.totalCost,
-            costPerMile: stats.costPerMile,
-            co2Saved: stats.co2Saved,
-            co2Change: stats.co2Change || 0, // 🚀 Monthly change patched here
-            mostUsedLine: stats.mostUsedLine,
-            mostUsedLineCount: stats.mostUsedLineCount,
-            longestRideMiles: stats.longestRideMiles,
-            longestRideLine: stats.longestRideLine,
-            longestRideRoute: stats.longestRideRoute,
-            timePeriod,
-            transitType,
-            updatedAt: FieldValue.serverTimestamp(),
-          });
-      }
-    }
+    // 🚀 OPTIMIZED: Update ALL stats efficiently with single read after deletion
+    await updateAllStatsAndDetailsEfficiently(userId);
 
     await updateRecentSelections(userId, null);
-    await updateDetailStats(userId); // ✅ Added here
 
-    // 🔥 NEW: Sync metrics field for leaderboards after deletion
+    // 🔥 Sync metrics field for leaderboards after deletion
     console.log(`📊 Syncing metrics field for leaderboards after deletion: ${userId}`);
     await syncMetricsForLeaderboards(userId);
 
-    console.log(`🗑️ Ride deleted and stats cleanup completed for user: ${userId}`);
+    console.log(`🗑️ Ride deleted and stats cleanup completed efficiently for user: ${userId}`);
   } catch (error) {
     console.error(`❌ Error cleaning up stats after ride deletion for user ${event.params.userId}:`, error);
   }
 });
 
-// 🔥 NEW HELPER FUNCTION: Sync Metrics for Leaderboards
+// 🚀 NEW OPTIMIZED FUNCTION: Update all stats and details with single read
+async function updateAllStatsAndDetailsEfficiently(userId) {
+  console.log(`📊 Starting efficient stats update for user: ${userId}`);
+  
+  // Step 1: Read ALL user rides once (the only database read!)
+  const allRidesSnapshot = await db.collection('users').doc(userId).collection('rides').get();
+  const allRides = allRidesSnapshot.docs
+    .map((doc) => doc.data())
+    .filter((ride) => !ride.inProgress); // Filter out in-progress rides
+
+  // Step 2: Process all combinations efficiently using the same data
+  for (const timePeriod of timePeriods) {
+    for (const transitType of transitTypes) {
+      // Filter rides for this specific combination (no additional reads!)
+      const filteredRides = filterRidesForPeriodAndType(allRides, timePeriod, transitType);
+      
+      // Calculate regular stats using filtered data
+      const stats = calculateStatsFromRides(filteredRides, userId, timePeriod, transitType);
+      
+      // Calculate detail stats using same filtered data  
+      const detailStats = calculateDetailStatsFromRides(filteredRides, timePeriod, transitType);
+      
+      // Save regular stats (same structure as before)
+      await db
+        .collection('users')
+        .doc(userId)
+        .collection('stats')
+        .doc(`${timePeriod}_${transitType}`)
+        .set({
+          totalDistance: stats.totalDistance,
+          averageDistancePerWeek: stats.averageDistancePerWeek,
+          totalTimeMinutes: stats.totalTimeMinutes,
+          totalTimeHours: stats.totalTimeHours,
+          totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
+          totalRides: stats.totalRides,
+          rideCountChange: stats.rideCountChange || 0,
+          totalCost: stats.totalCost,
+          costPerMile: stats.costPerMile,
+          co2Saved: stats.co2Saved,
+          co2Change: stats.co2Change || 0,
+          mostUsedLine: stats.mostUsedLine,
+          mostUsedLineCount: stats.mostUsedLineCount,
+          longestRideMiles: stats.longestRideMiles,
+          longestRideLine: stats.longestRideLine,
+          longestRideRoute: stats.longestRideRoute,
+          timePeriod,
+          transitType,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      
+      // Save detail stats (same structure as before)
+      await db
+        .collection('users')
+        .doc(userId)
+        .collection('detailStats')
+        .doc(`${timePeriod}_${transitType}`)
+        .set({
+          ...detailStats,
+          timePeriod,
+          transitType,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+    }
+  }
+  
+  console.log(`✅ Efficient stats update completed for user: ${userId}`);
+}
+
+// Helper function: Filter rides based on time period and transit type
+function filterRidesForPeriodAndType(allRides, timePeriod, transitType) {
+  const now = new Date();
+  let startDate;
+
+  // Same filtering logic as your current calculateStats
+  switch (timePeriod) {
+    case '1w': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
+    case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
+    case '1y': startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); break;
+    case 'ytd': startDate = new Date(now.getFullYear(), 0, 1); break;
+    default: startDate = null; // allTime
+  }
+
+  return allRides.filter((ride) => {
+    // Filter by time period
+    if (startDate) {
+      const rideTime = new Date(ride.startTime?.toDate ? ride.startTime.toDate() : ride.startTime);
+      if (rideTime < startDate) return false;
+    }
+    
+    // Filter by transit type
+    if (transitType !== 'all' && ride.type !== transitType) return false;
+    
+    return true;
+  });
+}
+
+// 🔥 HELPER FUNCTION: Sync Metrics for Leaderboards (unchanged)
 async function syncMetricsForLeaderboards(userId) {
   const metricsUpdate = {};
 
@@ -442,34 +474,11 @@ async function updateRecentSelections(userId, rideSnap) {
   }
 }
 
-// ---------------- UPDATED CALCULATE STATS WITH NULL CHECKS ---------------- //
+// ---------------- OPTIMIZED CALCULATE STATS HELPER FUNCTIONS (NO DATABASE READS) ---------------- //
 
-async function calculateStats(userId, timePeriod, transitType) {
-  // Query and filtering code stays the same...
-  let ridesQuery = db.collection('users').doc(userId).collection('rides');
-  const now = new Date();
-  let startDate;
-
-  switch (timePeriod) {
-    case '1w': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
-    case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
-    case '1y': startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); break;
-    case 'ytd': startDate = new Date(now.getFullYear(), 0, 1); break;
-    default: startDate = null;
-  }
-
-  if (startDate) {
-    ridesQuery = ridesQuery.where('startTime', '>=', startDate);
-  }
-
-  const ridesSnapshot = await ridesQuery.get();
-  const rides = ridesSnapshot.docs
-    .map((doc) => doc.data())
-    .filter((ride) => 
-      (transitType === 'all' || ride.type === transitType) && 
-      !ride.inProgress 
-    );
-
+// Modified calculateStats to work with pre-filtered rides (no database reads!)
+function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
+  // Sort rides by time (same as original)
   rides.sort((a, b) => {
     const timeA = new Date(a.startTime?.toDate ? a.startTime.toDate() : a.startTime);
     const timeB = new Date(b.startTime?.toDate ? b.startTime.toDate() : b.startTime);
@@ -485,6 +494,7 @@ async function calculateStats(userId, timePeriod, transitType) {
   let lastChargeTime = null;
   let longestRide = null;
 
+  // Same calculation logic as your original calculateStats function
   for (const ride of rides) {
     const { distanceKm, durationMinutes, startTime, type, line, startStop, endStop } = ride;
 
@@ -522,13 +532,25 @@ async function calculateStats(userId, timePeriod, transitType) {
   const totalTimeHours = Math.floor(totalTime / 60);
   const totalTimeRemainingMinutes = totalTime % 60;
 
+  const now = new Date();
   let averageDistancePerWeek = 0;
-  if (startDate) {
-    const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
-    if (durationWeeks > 0) averageDistancePerWeek = totalDistance / durationWeeks;
+  
+  // Calculate average distance per week based on time period
+  if (timePeriod !== 'allTime') {
+    let startDate;
+    switch (timePeriod) {
+      case '1w': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
+      case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
+      case '1y': startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); break;
+      case 'ytd': startDate = new Date(now.getFullYear(), 0, 1); break;
+    }
+    if (startDate) {
+      const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
+      if (durationWeeks > 0) averageDistancePerWeek = totalDistance / durationWeeks;
+    }
   }
 
-  // Monthly change calculations
+  // Monthly change calculations (optimized to use already-filtered rides)
   let rideCountChange = null;
   let co2Change = null;
 
@@ -536,22 +558,17 @@ async function calculateStats(userId, timePeriod, transitType) {
     const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
-    const ridesLastMonthSnapshot = await db.collection('users').doc(userId).collection('rides')
-      .where('startTime', '>=', startOfLastMonth)
-      .where('startTime', '<', startOfThisMonth)
-      .get();
-
-    const lastMonthRides = ridesLastMonthSnapshot.docs
-      .map((doc) => doc.data())
-      .filter((ride) => 
-        (transitType === 'all' || ride.type === transitType) &&
-        !ride.inProgress
-      );
+    // Filter from already-loaded rides instead of making another database query
+    const lastMonthRides = rides.filter(ride => {
+      const rideTime = new Date(ride.startTime?.toDate ? ride.startTime.toDate() : ride.startTime);
+      return rideTime >= startOfLastMonth && rideTime < startOfThisMonth &&
+             (transitType === 'all' || ride.type === transitType);
+    });
 
     const ridesLastMonth = lastMonthRides.length;
     rideCountChange = totalRides - ridesLastMonth;
 
-    // 🔥 NULL CHECK FIX: Already fixed this one earlier
+    // 🔥 NULL CHECK FIX: Calculate CO2 from filtered rides
     const co2LastMonth = lastMonthRides
       .reduce((sum, ride) => 
         sum + (ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2), 0
@@ -586,31 +603,9 @@ async function calculateStats(userId, timePeriod, transitType) {
   };
 }
 
-// ---------------- HELPER: DETAILED STATS WITH NULL CHECKS ---------------- //
-
-async function calculateDetailStats(userId, timePeriod, transitType) {
-  // Query setup stays the same...
-  let ridesQuery = db.collection('users').doc(userId).collection('rides');
-  const now = new Date();
-  let startDate;
-
-  switch (timePeriod) {
-    case '1w': startDate = new Date(now.getTime() - 7 * 86400000); break;
-    case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
-    case '1y': startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); break;
-    case 'ytd': startDate = new Date(now.getFullYear(), 0, 1); break;
-    default: startDate = null;
-  }
-
-  if (startDate) {
-    ridesQuery = ridesQuery.where('startTime', '>=', startDate);
-  }
-
-  const ridesSnapshot = await ridesQuery.get();
-  const rides = ridesSnapshot.docs
-    .map(doc => doc.data())
-    .filter(ride => !ride.inProgress && (transitType === 'all' || ride.type === transitType));
-
+// Modified calculateDetailStats to work with pre-filtered rides (no database reads!)
+function calculateDetailStatsFromRides(rides, timePeriod, transitType) {
+  // Sort rides by time (same as original)
   rides.sort((a, b) => {
     const timeA = new Date(a.startTime?.toDate ? a.startTime.toDate() : a.startTime);
     const timeB = new Date(b.startTime?.toDate ? b.startTime.toDate() : b.startTime);
@@ -624,6 +619,7 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
   let lastChargeTime = null;
   const lineCosts = {};
 
+  // Same detailed calculation logic as your original calculateDetailStats function
   for (const ride of rides) {
     const {
       line, distanceKm = 0, durationMinutes = 0, startStop, endStop,
@@ -677,7 +673,7 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     }
 
     longestRides.push({
-      rideId: rideId || null,    // ← Fixed line
+      rideId: rideId || null,
       line,
       distanceKm: (distanceKm || 0),
       startStop,
@@ -686,7 +682,7 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     });
   }
 
-  // Rest of the function stays exactly the same...
+  // Rest of the logic exactly the same as your original...
   const topByDistance = Object.entries(lineStats)
     .sort((a, b) => b[1].totalDistanceKm - a[1].totalDistanceKm)
     .slice(0, 5)
@@ -744,27 +740,6 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     mostUsedLineDetails,
     longestRides: longestRideList
   };
-}
-
-// ---------------- HELPER: DETAILED STATS ---------------- //
-
-async function updateDetailStats(userId) {
-  for (const timePeriod of timePeriods) {
-    for (const transitType of transitTypes) {
-      const details = await calculateDetailStats(userId, timePeriod, transitType);
-      await db
-        .collection('users')
-        .doc(userId)
-        .collection('detailStats')
-        .doc(`${timePeriod}_${transitType}`)
-        .set({
-          ...details,
-          timePeriod,
-          transitType,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-    }
-  }
 }
 
 // ---------------- PUSH NOTIFICATIONS ---------------- //
