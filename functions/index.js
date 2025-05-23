@@ -990,7 +990,8 @@ exports.startLiveRide = onCall(async (request) => {
     manualEntry: false,
   };
 
-  const rideRef = await db.collection('rides').add(rideData);
+  // 🔥 FIXED: Write to user subcollection instead of root collection
+  const rideRef = await db.collection('users').doc(userId).collection('rides').add(rideData);
 
   console.log(`🚀 Live ride started for user: ${userId}, rideId: ${rideRef.id}`);
   return { rideId: rideRef.id };
@@ -998,13 +999,14 @@ exports.startLiveRide = onCall(async (request) => {
 
 // Update an active live ride
 exports.updateLiveRide = onCall(async (request) => {
-  const { rideId, distanceIncrementMiles, timeIncrementSeconds } = request.data;
+  const { rideId, distanceIncrementMiles, timeIncrementSeconds, userId } = request.data;
 
-  if (!rideId || distanceIncrementMiles == null || timeIncrementSeconds == null) {
+  if (!rideId || distanceIncrementMiles == null || timeIncrementSeconds == null || !userId) {
     throw new Error('Missing required parameters.');
   }
 
-  const rideRef = db.collection('rides').doc(rideId);
+  // 🔥 FIXED: Read from user subcollection instead of root collection
+  const rideRef = db.collection('users').doc(userId).collection('rides').doc(rideId);
   const rideSnap = await rideRef.get();
 
   if (!rideSnap.exists) {
@@ -1037,16 +1039,16 @@ exports.updateLiveRide = onCall(async (request) => {
   return { success: true };
 });
 
-
 // End a live ride (finalize)
 exports.endLiveRide = onCall(async (request) => {
-  const { rideId, endStop } = request.data;
+  const { rideId, endStop, userId } = request.data;
 
-  if (!rideId || !endStop) {
+  if (!rideId || !endStop || !userId) {
     throw new Error('Missing required parameters.');
   }
 
-  const rideRef = db.collection('rides').doc(rideId);
+  // 🔥 FIXED: Read from user subcollection instead of root collection
+  const rideRef = db.collection('users').doc(userId).collection('rides').doc(rideId);
   const rideSnap = await rideRef.get();
 
   if (!rideSnap.exists) {
@@ -1077,17 +1079,19 @@ exports.endLiveRide = onCall(async (request) => {
 
 // Discard a live ride (delete)
 exports.discardLiveRide = onCall(async (request) => {
-  const { rideId } = request.data;
+  const { rideId, userId } = request.data;
 
-  if (!rideId) {
-    throw new Error('Missing rideId.');
+  if (!rideId || !userId) {
+    throw new Error('Missing required parameters.');
   }
 
-  await db.collection('rides').doc(rideId).delete();
+  // 🔥 FIXED: Delete from user subcollection instead of root collection
+  await db.collection('users').doc(userId).collection('rides').doc(rideId).delete();
 
   console.log(`🗑️ Live ride discarded: ${rideId}`);
   return { success: true };
 });
+
 // ---------------- OPTIMIZE PROFILE PHOTO ON UPLOAD ---------------- //
 // This Cloud Function triggers when a new profile photo is uploaded to Storage.
 // It auto-compresses and resizes the image to 512x512 JPG format to save bandwidth and storage.
