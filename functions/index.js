@@ -696,7 +696,7 @@ async function calculateDetailStats(userId, timePeriod, transitType) {
     }
 
     longestRides.push({
-      rideId,
+      rideId: rideId || null,    // ← Fixed line
       line,
       distanceKm: (distanceKm || 0),
       startStop,
