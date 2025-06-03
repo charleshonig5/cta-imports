@@ -255,7 +255,7 @@ exports.onRideDelete = onDocumentDeleted('users/{userId}/rides/{rideId}', async 
   }
 });
 
-// 🚀 NEW OPTIMIZED FUNCTION: Update all stats and details with single read
+// 🚀 NEW OPTIMIZED FUNCTION: Update all stats and details with single read + BATCHING
 async function updateAllStatsAndDetailsEfficiently(userId) {
   console.log(`📊 Starting efficient stats update for user: ${userId}`);
   
@@ -265,60 +265,53 @@ async function updateAllStatsAndDetailsEfficiently(userId) {
     .map((doc) => doc.data())
     .filter((ride) => !ride.inProgress); // Filter out in-progress rides
 
-  // Step 2: Process all combinations efficiently using the same data
+  // 🔥 NEW: Create single batch for all writes
+  const batch = db.batch();
+
+  // Step 2: Process all combinations and ADD TO BATCH (don't write yet)
   for (const timePeriod of timePeriods) {
     for (const transitType of transitTypes) {
-      // Filter rides for this specific combination (no additional reads!)
       const filteredRides = filterRidesForPeriodAndType(allRides, timePeriod, transitType);
-      
-      // Calculate regular stats using filtered data
       const stats = calculateStatsFromRides(filteredRides, userId, timePeriod, transitType);
-      
-      // Calculate detail stats using same filtered data  
       const detailStats = calculateDetailStatsFromRides(filteredRides, timePeriod, transitType);
       
-      // Save regular stats (same structure as before)
-      await db
-        .collection('users')
-        .doc(userId)
-        .collection('stats')
-        .doc(`${timePeriod}_${transitType}`)
-        .set({
-          totalDistance: stats.totalDistance,
-          averageDistancePerWeek: stats.averageDistancePerWeek,
-          totalTimeMinutes: stats.totalTimeMinutes,
-          totalTimeHours: stats.totalTimeHours,
-          totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
-          totalRides: stats.totalRides,
-          rideCountChange: stats.rideCountChange || 0,
-          totalCost: stats.totalCost,
-          costPerMile: stats.costPerMile,
-          co2Saved: stats.co2Saved,
-          co2Change: stats.co2Change || 0,
-          mostUsedLine: stats.mostUsedLine,
-          mostUsedLineCount: stats.mostUsedLineCount,
-          longestRideMiles: stats.longestRideMiles,
-          longestRideLine: stats.longestRideLine,
-          longestRideRoute: stats.longestRideRoute,
-          timePeriod,
-          transitType,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
+      // Add to batch instead of writing immediately
+      const statsRef = db.collection('users').doc(userId).collection('stats').doc(`${timePeriod}_${transitType}`);
+      const detailRef = db.collection('users').doc(userId).collection('detailStats').doc(`${timePeriod}_${transitType}`);
       
-      // Save detail stats (same structure as before)
-      await db
-        .collection('users')
-        .doc(userId)
-        .collection('detailStats')
-        .doc(`${timePeriod}_${transitType}`)
-        .set({
-          ...detailStats,
-          timePeriod,
-          transitType,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
+      batch.set(statsRef, {
+        totalDistance: stats.totalDistance,
+        averageDistancePerWeek: stats.averageDistancePerWeek,
+        totalTimeMinutes: stats.totalTimeMinutes,
+        totalTimeHours: stats.totalTimeHours,
+        totalTimeRemainingMinutes: stats.totalTimeRemainingMinutes,
+        totalRides: stats.totalRides,
+        rideCountChange: stats.rideCountChange || 0,
+        totalCost: stats.totalCost,
+        costPerMile: stats.costPerMile,
+        co2Saved: stats.co2Saved,
+        co2Change: stats.co2Change || 0,
+        mostUsedLine: stats.mostUsedLine,
+        mostUsedLineCount: stats.mostUsedLineCount,
+        longestRideMiles: stats.longestRideMiles,
+        longestRideLine: stats.longestRideLine,
+        longestRideRoute: stats.longestRideRoute,
+        timePeriod,
+        transitType,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      
+      batch.set(detailRef, {
+        ...detailStats,
+        timePeriod,
+        transitType,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
     }
   }
+  
+  // 🚀 SINGLE DATABASE OPERATION: Write all 30 documents at once
+  await batch.commit();
   
   console.log(`✅ Efficient stats update completed for user: ${userId}`);
 }
