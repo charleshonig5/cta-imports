@@ -8,7 +8,7 @@ const { FieldValue } = require('firebase-admin/firestore');
 const sharp = require('sharp'); // Required for profile photo compression
 const leoProfanity = require("leo-profanity");
 const customBannedUsernames = ['admin', 'moderator', 'support', 'cta', 'transitstats', 'fuck'];
-
+const pendingUpdates = new Map();
 
 
 admin.initializeApp();
@@ -158,7 +158,7 @@ const transitTypes = ['all', 'bus', 'train'];
 const timePeriods = ['allTime', '1w', '1m', '1y', 'ytd'];
 
 /**
- * 🔄 Update User Stats on Ride Write (Create or Update)
+ * 🔄 Update User Stats on Ride Write (Create or Update) - WITH DEBOUNCING
  */
 exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (event) => {
   try {
@@ -177,22 +177,46 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
       return;
     }
 
+    // IMMEDIATE UPDATES (no debouncing needed)
     if (!isManual && startTime) {
       await handleStreakUpdate(userId, startTime);
     }
-
     await updateRecentSelections(userId, rideSnap);
 
-    // 🚀 OPTIMIZED: Update ALL stats efficiently with single read
-    await updateAllStatsAndDetailsEfficiently(userId);
+    // 🔥 NEW: DEBOUNCED HEAVY PROCESSING
+    // Clear any existing timeout for this user
+    if (pendingUpdates.has(userId)) {
+      clearTimeout(pendingUpdates.get(userId));
+      console.log(`⏳ Clearing previous stats update for ${userId}`);
+    }
 
-    // 🔥 Sync metrics field for leaderboards
-    console.log(`📊 Syncing metrics field for leaderboards: ${userId}`);
-    await syncMetricsForLeaderboards(userId);
+    // Set new timeout - wait 3 seconds for more rides
+    const timeoutId = setTimeout(async () => {
+      try {
+        console.log(`📊 Starting debounced stats update for user: ${userId}`);
+        
+        // 🚀 OPTIMIZED: Update ALL stats efficiently with single read
+        await updateAllStatsAndDetailsEfficiently(userId);
 
-    console.log(`✅ Stats updated efficiently for user: ${userId}`);
-    // 🔥 Check achievements AFTER stats are calculated
-    await checkAndUnlockAchievements(userId);
+        // 🔥 Sync metrics field for leaderboards
+        console.log(`📊 Syncing metrics field for leaderboards: ${userId}`);
+        await syncMetricsForLeaderboards(userId);
+
+        console.log(`✅ Stats updated efficiently for user: ${userId}`);
+        
+        // 🔥 Check achievements AFTER stats are calculated
+        await checkAndUnlockAchievements(userId);
+        
+      } catch (error) {
+        console.error(`❌ Error in debounced stats update for ${userId}:`, error);
+      } finally {
+        pendingUpdates.delete(userId);
+      }
+    }, 3000); // Wait 3 seconds
+
+    pendingUpdates.set(userId, timeoutId);
+    console.log(`⏱️ Stats update scheduled for ${userId} in 3 seconds`);
+
   } catch (error) {
     console.error(`❌ Error updating stats for user ${event.params.userId}:`, error);
   }
