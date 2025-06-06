@@ -212,6 +212,51 @@ exports.scheduledLeaderboardUpdateDaily = onSchedule('every 24 hours', async () 
   }
 });
 
+// ---------------- NIGHTLY STATS ACCURACY CHECK ---------------- //
+
+exports.nightlyStatsAccuracyCheck = onSchedule('every 24 hours', async () => {
+  console.log('🌙 Starting nightly stats accuracy verification...');
+  
+  const usersSnapshot = await db.collection('users')
+    .where('lastRideDate', '>', thirtyDaysAgo())
+    .get();
+  
+  let checked = 0;
+  let corrected = 0;
+  
+  for (const userDoc of usersSnapshot.docs) {
+    try {
+      // Get one sample stat to check if recalculation is needed
+      const sampleStatRef = db.collection('users').doc(userDoc.id)
+        .collection('stats').doc('allTime_all');
+      const sampleStat = await sampleStatRef.get();
+      
+      if (sampleStat.exists) {
+        const lastUpdated = sampleStat.data().updatedAt?.toMillis() || 0;
+        const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+        
+        // Only recalculate if stats are more than a day old
+        if (lastUpdated < oneDayAgo) {
+          await updateAllStatsAndDetailsEfficiently(userDoc.id);
+          corrected++;
+        }
+      }
+      
+      checked++;
+      
+      // Pace ourselves to avoid overwhelming Firestore
+      if (checked % 100 === 0) {
+        console.log(`📊 Progress: Checked ${checked} users, corrected ${corrected}`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    } catch (error) {
+      console.error(`Error checking stats for user ${userDoc.id}:`, error);
+    }
+  }
+  
+  console.log(`✅ Verified stats accuracy for ${checked} active users, corrected ${corrected}`);
+});
+
 // ---------------- STATS + STREAKS ---------------- //
 
 const transitTypes = ['all', 'bus', 'train'];
@@ -245,48 +290,49 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
       return;
     }
 
-    // IMMEDIATE UPDATES (no debouncing needed)
+   // IMMEDIATE UPDATES (no debouncing needed)
     if (!isManual && startTime) {
       await handleStreakUpdate(userId, startTime);
     }
     await updateRecentSelections(userId, rideSnap);
+    
+    // 🔥 NEW: Increment stats immediately for instant feedback
+    await incrementStatsForNewRide(userId, rideData);
 
-    // 🔥 NEW: Safety check - prevent unbounded growth
+    // Safety check - prevent unbounded growth
     if (pendingUpdates.size > MAX_PENDING_SIZE) {
       console.error(`⚠️ Clearing pendingUpdates - size exceeded ${MAX_PENDING_SIZE}`);
-      // Clear all pending updates to free memory
       for (const timeoutId of pendingUpdates.values()) {
         clearTimeout(timeoutId);
       }
       pendingUpdates.clear();
     }
 
-    // Rest of your existing debouncing code stays the same...
+    // Clear existing timeout
     if (pendingUpdates.has(userId)) {
       clearTimeout(pendingUpdates.get(userId));
       console.log(`⏳ Clearing previous stats update for ${userId}`);
     }
 
+    // Schedule full recalculation as verification (longer delay now)
     const timeoutId = setTimeout(async () => {
       try {
-        console.log(`📊 Starting debounced stats update for user: ${userId}`);
+        console.log(`📊 Running full stats verification for user: ${userId}`);
         
+        // This now serves as accuracy check rather than primary update
         await updateAllStatsAndDetailsEfficiently(userId);
         await syncMetricsForLeaderboards(userId);
-
-        console.log(`✅ Stats updated efficiently for user: ${userId}`);
-        
         await checkAndUnlockAchievements(userId);
         
       } catch (error) {
-        console.error(`❌ Error in debounced stats update for ${userId}:`, error);
+        console.error(`❌ Error in stats verification for ${userId}:`, error);
       } finally {
         pendingUpdates.delete(userId);
       }
-    }, 3000);
+    }, 30000); // Increased to 30 seconds since stats already updated
 
     pendingUpdates.set(userId, timeoutId);
-    console.log(`⏱️ Stats update scheduled for ${userId} in 3 seconds (pending: ${pendingUpdates.size})`);
+    console.log(`⏱️ Stats verification scheduled for ${userId} in 30 seconds (pending: ${pendingUpdates.size})`);
 
   } catch (error) {
     console.error(`❌ Error in onRideWrite for user ${event.params.userId}:`, error);
@@ -868,6 +914,95 @@ function calculateDetailStatsFromRides(rides, timePeriod, transitType) {
       longestRides: []
     };
   }
+}
+
+// ---------------- INCREMENTAL STATS UPDATE ---------------- //
+
+async function incrementStatsForNewRide(userId, ride) {
+  const batch = db.batch();
+  
+  // Increment stats for each time period and transit type
+  for (const timePeriod of timePeriods) {
+    for (const transitType of transitTypes) {
+      // Skip if ride doesn't match criteria
+      if (transitType !== 'all' && ride.type !== transitType) continue;
+      if (!isRideInTimePeriod(ride, timePeriod)) continue;
+      
+      const statsRef = db.collection('users').doc(userId)
+        .collection('stats').doc(`${timePeriod}_${transitType}`);
+      
+      // Check if stats document exists
+      const statsDoc = await statsRef.get();
+      if (!statsDoc.exists) {
+        // Initialize with this ride's data if first ride
+        batch.set(statsRef, {
+          totalDistance: ride.distanceKm || 0,
+          totalRides: 1,
+          totalTimeMinutes: ride.durationMinutes || 0,
+          totalTimeHours: Math.floor((ride.durationMinutes || 0) / 60),
+          totalTimeRemainingMinutes: (ride.durationMinutes || 0) % 60,
+          totalCost: calculateRideCost(ride),
+          co2Saved: (ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2),
+          timePeriod,
+          transitType,
+          updatedAt: FieldValue.serverTimestamp()
+        });
+      } else {
+        // Increment existing stats
+        const currentStats = statsDoc.data();
+        const newTotalMinutes = (currentStats.totalTimeMinutes || 0) + (ride.durationMinutes || 0);
+        
+        batch.update(statsRef, {
+          totalDistance: FieldValue.increment(ride.distanceKm || 0),
+          totalRides: FieldValue.increment(1),
+          totalTimeMinutes: FieldValue.increment(ride.durationMinutes || 0),
+          totalTimeHours: Math.floor(newTotalMinutes / 60),
+          totalTimeRemainingMinutes: newTotalMinutes % 60,
+          totalCost: FieldValue.increment(calculateRideCost(ride)),
+          co2Saved: FieldValue.increment((ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2)),
+          updatedAt: FieldValue.serverTimestamp()
+        });
+      }
+    }
+  }
+  
+  await batch.commit();
+  console.log(`⚡ Stats incremented instantly for user ${userId}`);
+}
+
+// Helper to check if ride is in time period
+function isRideInTimePeriod(ride, timePeriod) {
+  const rideTime = new Date(ride.startTime?.toDate ? ride.startTime.toDate() : ride.startTime);
+  const now = new Date();
+  
+  switch (timePeriod) {
+    case '1w': 
+      const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      return rideTime >= oneWeekAgo;
+    case '1m':
+      const oneMonthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+      return rideTime >= oneMonthAgo;
+    case '1y':
+      const oneYearAgo = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate());
+      return rideTime >= oneYearAgo;
+    case 'ytd':
+      const yearStart = new Date(now.getFullYear(), 0, 1);
+      return rideTime >= yearStart;
+    case 'allTime':
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Helper to calculate ride cost
+function calculateRideCost(ride) {
+  // TODO: Add transfer logic here if needed
+  return ride.type === 'bus' ? 2.25 : 2.5;
+}
+
+function thirtyDaysAgo() {
+  return new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 }
 
 // ---------------- PUSH NOTIFICATIONS ---------------- //
