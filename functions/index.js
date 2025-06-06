@@ -84,15 +84,40 @@ const CATEGORIES = ['rides', 'distance', 'co2'];
 async function processLeaderboardCategory(timePeriod, category) {
   const metricField = `metrics.${timePeriod}_${category}`;
   
-  // Step 1: Get all users with this metric, sorted by Firestore (much more efficient!)
+  // 🔥 NEW: Define "active" based on the time period (SAFE VERSION)
+  let activeUserCutoff;
+  switch(timePeriod) {
+    case '1w':
+      activeUserCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // 30 days
+      break;
+    case '1m':
+      activeUserCutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000); // 90 days
+      break;
+    case '1y':
+    case 'ytd':
+      activeUserCutoff = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000); // 13 months
+      break;
+    case 'all_time':
+      activeUserCutoff = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000); // 2 years
+      break;
+    default:
+      activeUserCutoff = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000); // 6 months fallback
+  }
+  
+  // 🔥 NEW: Only get recently active users
   const usersQuery = await db.collection('users')
+    .where('lastRideDate', '>', activeUserCutoff)
     .where(metricField, '>', 0)
-    .orderBy(metricField, 'desc') // Firestore sorts server-side instead of JavaScript
-    .select('metrics') // Only fetch metrics field to reduce data transfer
+    .orderBy('lastRideDate', 'desc') // Must order by first where field
+    .orderBy(metricField, 'desc')     // Then by metric
+    .select('metrics', 'lastRideDate') // Only fetch needed fields
     .get();
 
+  // 🔥 NEW: Log how many users we're processing
+  console.log(`📊 Processing ${usersQuery.size} active users for ${category} leaderboard (${timePeriod})`);
+
   if (usersQuery.empty) {
-    console.log(`ℹ️ No users found for ${category} leaderboard (${timePeriod})`);
+    console.log(`ℹ️ No active users found for ${category} leaderboard (${timePeriod})`);
     return;
   }
 
@@ -322,7 +347,7 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
         // This now serves as accuracy check rather than primary update
         await updateAllStatsAndDetailsEfficiently(userId);
         await syncMetricsForLeaderboards(userId);
-        await checkAndUnlockAchievements(userId);
+        await checkRelevantAchievements(userId, rideData);
         
       } catch (error) {
         console.error(`❌ Error in stats verification for ${userId}:`, error);
@@ -1491,6 +1516,101 @@ async function checkAndUnlockAchievements(userId) {
           await unlockAchievement(userId, "wheels_of_the_city");
         }
       }
+    }
+  }
+}
+
+// 🔥 NEW: Smart achievement checking - only check relevant ones
+async function checkRelevantAchievements(userId, ride) {
+  const userRef = db.collection('users').doc(userId);
+  
+  // Get current stats efficiently
+  const statsDoc = await userRef.collection('stats').doc('allTime_all').get();
+  const stats = statsDoc.exists ? statsDoc.data() : {};
+  
+  const totalRides = stats.totalRides || 0;
+  const totalDistance = stats.totalDistance || 0;
+  const totalCO2 = stats.co2Saved || 0;
+
+  console.log(`🎯 Smart achievement check for ${userId}: ${totalRides} rides, ${totalDistance}km, ${totalCO2}kg CO2`);
+
+  // RIDE COUNT - Only check the exact milestone we just hit
+  const rideMilestones = {
+    1: "getting_started",
+    10: "getting_the_hang", 
+    25: "city_commuter",
+    50: "transit_regular",
+    100: "transit_hero",
+    250: "ultimate_rider"
+  };
+  
+  if (rideMilestones[totalRides]) {
+    await unlockAchievement(userId, rideMilestones[totalRides]);
+  }
+
+  // DISTANCE - Only check if we just crossed a threshold
+  const distanceThresholds = [
+    { km: 10, id: "warming_up" },
+    { km: 25, id: "rolling_along" },
+    { km: 50, id: "transit_star" },
+    { km: 100, id: "transit_veteran" },
+    { km: 250, id: "master_of_the_map" }
+  ];
+
+  for (const threshold of distanceThresholds) {
+    const previousDistance = totalDistance - (ride.distanceKm || 0);
+    if (previousDistance < threshold.km && totalDistance >= threshold.km) {
+      await unlockAchievement(userId, threshold.id);
+      break; // Only one distance achievement per ride
+    }
+  }
+
+  // CO2 - Only check if we just crossed a threshold
+  const co2Thresholds = [
+    { kg: 10, id: "carbon_kicker" },
+    { kg: 25, id: "eco_rider" },
+    { kg: 50, id: "planet_mover" },
+    { kg: 100, id: "green_machine" },
+    { kg: 250, id: "sustainability_hero" }
+  ];
+
+  const rideCO2 = (ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2);
+  for (const threshold of co2Thresholds) {
+    const previousCO2 = totalCO2 - rideCO2;
+    if (previousCO2 < threshold.kg && totalCO2 >= threshold.kg) {
+      await unlockAchievement(userId, threshold.id);
+      break; // Only one CO2 achievement per ride
+    }
+  }
+
+  // SPECIALTY achievements - only check these for the current ride
+  if (ride) {
+    const hour = new Date(ride.startTime?.toDate?.() || ride.startTime).getHours();
+    
+    // Time-based (only check if ride matches criteria)
+    if (ride.wasLiveTracked && hour >= 23) {
+      await unlockAchievement(userId, "night_owl");
+    }
+    if (ride.wasLiveTracked && hour < 6) {
+      await unlockAchievement(userId, "early_bird");
+    }
+
+    // Route-based
+    if (ride.startStop === ride.endStop) {
+      await unlockAchievement(userId, "loop_de_loop");
+    }
+
+    // Stop count
+    if (ride.stopCount === 1) {
+      await unlockAchievement(userId, "one_stop_wonder");
+    }
+    if (ride.stopCount >= 15) {
+      await unlockAchievement(userId, "scenic_route");
+    }
+
+    // Line completion - only check if new line
+    if (ride.lineId && ride.type) {
+      await checkLineCompletionAchievements(userId, ride.lineId, ride.type);
     }
   }
 }
