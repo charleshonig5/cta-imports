@@ -17,6 +17,18 @@ admin.initializeApp();
 const db = admin.firestore();
 const storage = admin.storage();
 
+// ---------------- SAFE NUMBER HELPERS ---------------- //
+function safeNumber(value, defaultValue = 0) {
+  const num = parseFloat(value);
+  return !isNaN(num) && isFinite(num) ? num : defaultValue;
+}
+
+function safeDivide(numerator, denominator, defaultValue = 0) {
+  if (!denominator || denominator === 0) return defaultValue;
+  const result = numerator / denominator;
+  return !isNaN(result) && isFinite(result) ? result : defaultValue;
+}
+
 /// ---------------- RIDE VALIDATION ---------------- //
 
 function validateRide(ride) {
@@ -610,7 +622,7 @@ function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
     const mostUsedLine = mostUsedLineEntry?.[0] || null;
     const mostUsedLineCount = mostUsedLineEntry?.[1] || null;
 
-    const costPerMile = totalDistance > 0 ? totalCost / totalDistance : 0;
+    const costPerMile = safeDivide(totalCost, totalDistance, 0);
     const totalTimeHours = Math.floor(totalTime / 60);
     const totalTimeRemainingMinutes = totalTime % 60;
 
@@ -628,7 +640,7 @@ function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
       }
       if (startDate) {
         const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
-        if (durationWeeks > 0) averageDistancePerWeek = totalDistance / durationWeeks;
+        averageDistancePerWeek = safeDivide(totalDistance, durationWeeks, 0);
       }
     }
 
