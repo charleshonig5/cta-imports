@@ -1490,30 +1490,46 @@ exports.findNearbyTransit = onCall(async (request) => {
     return EARTH_RADIUS * c;
   }
 
-  const stopsSnapshot = await db.collection('stops').get();
-
+  // 🔥 NEW: Calculate geohash for user location
+  const geohash = require('ngeohash');
+  const userGeohash = geohash.encode(lat, lng, 6);
+  const neighbors = geohash.neighbors(userGeohash);
+  
+  // Query nearby geohash cells (center + 8 neighbors)
+  const geohashesToQuery = [userGeohash, ...Object.values(neighbors)];
+  
   const nearbyStops = [];
-
-  for (const doc of stopsSnapshot.docs) {
-    const data = doc.data();
-    const stopLat = data.lat;
-    const stopLng = data.lon;
-
-    if (stopLat == null || stopLng == null) continue;
-
-    const distance = haversineDistance(lat, lng, stopLat, stopLng);
-    if (distance > radiusMeters) continue;
-
-    nearbyStops.push({
-      stopId: doc.id,
-      stopName: data.name || '',
-      lat: stopLat,
-      lon: stopLng,
-      type: data.type || '',
-      lineId: data.lineId || '',
-      lineName: data.lineName || '',
-      distanceMeters: distance,
-    });
+  
+  // 🔥 NEW: Query each geohash cell instead of ALL stops
+  for (const hash of geohashesToQuery) {
+    const snapshot = await db.collection('stops')
+      .where('geohash', '>=', hash)
+      .where('geohash', '<', hash + '\uf8ff')
+      .get();
+    
+    // Add stops from this cell
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      const stopLat = data.lat;
+      const stopLon = data.lon;
+      
+      if (stopLat == null || stopLon == null) continue;
+      
+      // Still calculate exact distance for accuracy
+      const distance = haversineDistance(lat, lng, stopLat, stopLon);
+      if (distance > radiusMeters) continue;
+      
+      nearbyStops.push({
+        stopId: doc.id,
+        stopName: data.name || '',
+        lat: stopLat,
+        lon: stopLon,
+        type: data.type || '',
+        lineId: data.lineId || '',
+        lineName: data.lineName || '',
+        distanceMeters: distance,
+      });
+    }
   }
 
   if (nearbyStops.length === 0) {
@@ -1541,6 +1557,7 @@ exports.findNearbyTransit = onCall(async (request) => {
   const bestStop = nearbyStops[0]; // closest one
 
   console.log(`📍 Nearby stop found: ${bestStop.stopName} (${bestStop.lineName}) — Confidence: ${confidenceLevel}`);
+  console.log(`📊 Queried ${geohashesToQuery.length} cells, found ${nearbyStops.length} stops within ${radiusMeters}m`);
 
   return {
     success: true,
@@ -1651,24 +1668,40 @@ exports.findNearbyEndStop = onCall(async (request) => {
     return EARTH_RADIUS * c;
   }
 
-  const stopsSnapshot = await db.collection('stops').where('lineId', '==', lineId).get();
+  // 🔥 NEW: Calculate geohash for user location
+  const geohash = require('ngeohash');
+  const userGeohash = geohash.encode(lat, lng, 6);
+  const neighbors = geohash.neighbors(userGeohash);
+  
+  // Query nearby geohash cells
+  const geohashesToQuery = [userGeohash, ...Object.values(neighbors)];
+  
   const nearbyStops = [];
+  
+  // 🔥 NEW: Query each geohash cell with lineId filter
+  for (const hash of geohashesToQuery) {
+    const snapshot = await db.collection('stops')
+      .where('lineId', '==', lineId)
+      .where('geohash', '>=', hash)
+      .where('geohash', '<', hash + '\uf8ff')
+      .get();
+    
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      const stopLat = data.lat;
+      const stopLon = data.lon;
 
-  for (const doc of stopsSnapshot.docs) {
-    const data = doc.data();
-    const stopLat = data.lat;
-    const stopLng = data.lon;
+      if (stopLat == null || stopLon == null) continue;
 
-    if (stopLat == null || stopLng == null) continue;
+      const distance = haversineDistance(lat, lng, stopLat, stopLon);
+      if (distance > radiusMeters) continue;
 
-    const distance = haversineDistance(lat, lng, stopLat, stopLng);
-    if (distance > radiusMeters) continue;
-
-    nearbyStops.push({
-      stopId: doc.id,
-      stopName: data.name || '',
-      distanceMeters: distance,
-    });
+      nearbyStops.push({
+        stopId: doc.id,
+        stopName: data.name || '',
+        distanceMeters: distance,
+      });
+    }
   }
 
   if (nearbyStops.length === 0) {
@@ -1680,6 +1713,7 @@ exports.findNearbyEndStop = onCall(async (request) => {
   const bestStop = nearbyStops[0];
 
   console.log(`🏁 End stop auto-filled: ${bestStop.stopName} (${bestStop.stopId}) – ${Math.round(bestStop.distanceMeters)}m`);
+  console.log(`📊 Queried ${geohashesToQuery.length} cells for line ${lineId}`);
 
   return {
     success: true,
