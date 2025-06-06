@@ -212,7 +212,7 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
     if (!rideSnap || !rideSnap.exists) return;
 
     const rideData = rideSnap.data();
-    const userId = event.params.userId; // FIXED: Use params instead of document field
+    const userId = event.params.userId; // ✅ FIXED: Use params
     const rideId = event.params.rideId;
 
     // 🔥 NEW: Validate ride data
@@ -277,8 +277,8 @@ exports.onRideDelete = onDocumentDeleted('users/{userId}/rides/{rideId}', async 
     const deletedRide = event.data?.data();
     if (!deletedRide) return;
 
-    const userId = deletedRide.userId;
-    if (!userId) return;
+    const userId = event.params.userId; // ✅ FIXED: Use params
+    const rideId = event.params.rideId; // ✅ Also get rideId from params
 
     const inProgress = deletedRide.inProgress || false;
 
@@ -1353,20 +1353,28 @@ exports.onUserUpdated = onDocumentUpdated("users/{userId}", async (event) => {
 
 // ---------------- RIDE STREAK ACHIEVEMENTS ---------------- //
 
-exports.onStreakUpdate = onDocumentWritten("users/{userId}/streaks", async (event) => {
+exports.onStreakUpdate = onDocumentWritten("users/{userId}", async (event) => {
   const userId = event.params.userId;
+  const before = event.data?.before?.data();
   const after = event.data?.after?.data();
 
   if (!after) return;
 
-  const currentStreak = after.currentStreak || 0;
+  // Check if streak fields actually changed
+  const beforeStreak = before?.currentStreak || 0;
+  const afterStreak = after?.currentStreak || 0;
+
+  // Only process if streak actually changed
+  if (beforeStreak === afterStreak) return;
+
+  const currentStreak = afterStreak;
 
   // Ride streak milestone achievements
-  if (currentStreak === 3) await unlockAchievement(userId, "quick_streak");
-  if (currentStreak === 7) await unlockAchievement(userId, "one_week_warrior");
-  if (currentStreak === 14) await unlockAchievement(userId, "on_a_roll");
-  if (currentStreak === 30) await unlockAchievement(userId, "cta_loyalist");
-  if (currentStreak === 60) await unlockAchievement(userId, "unstoppable");
+  if (currentStreak === 3 && beforeStreak < 3) await unlockAchievement(userId, "quick_streak");
+  if (currentStreak === 7 && beforeStreak < 7) await unlockAchievement(userId, "one_week_warrior");
+  if (currentStreak === 14 && beforeStreak < 14) await unlockAchievement(userId, "on_a_roll");
+  if (currentStreak === 30 && beforeStreak < 30) await unlockAchievement(userId, "cta_loyalist");
+  if (currentStreak === 60 && beforeStreak < 60) await unlockAchievement(userId, "unstoppable");
 });
 
 // ---------------- SHARE ACHIEVEMENT ---------------- //
