@@ -9,6 +9,8 @@ const sharp = require('sharp'); // Required for profile photo compression
 const leoProfanity = require("leo-profanity");
 const customBannedUsernames = ['admin', 'moderator', 'support', 'cta', 'transitstats', 'fuck'];
 const pendingUpdates = new Map();
+const MAX_PENDING_SIZE = 1000; // Safety limit to prevent memory leaks
+
 
 
 admin.initializeApp();
@@ -237,6 +239,16 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
     }
     await updateRecentSelections(userId, rideSnap);
 
+    // 🔥 NEW: Safety check - prevent unbounded growth
+    if (pendingUpdates.size > MAX_PENDING_SIZE) {
+      console.error(`⚠️ Clearing pendingUpdates - size exceeded ${MAX_PENDING_SIZE}`);
+      // Clear all pending updates to free memory
+      for (const timeoutId of pendingUpdates.values()) {
+        clearTimeout(timeoutId);
+      }
+      pendingUpdates.clear();
+    }
+
     // Rest of your existing debouncing code stays the same...
     if (pendingUpdates.has(userId)) {
       clearTimeout(pendingUpdates.get(userId));
@@ -262,7 +274,7 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
     }, 3000);
 
     pendingUpdates.set(userId, timeoutId);
-    console.log(`⏱️ Stats update scheduled for ${userId} in 3 seconds`);
+    console.log(`⏱️ Stats update scheduled for ${userId} in 3 seconds (pending: ${pendingUpdates.size})`);
 
   } catch (error) {
     console.error(`❌ Error in onRideWrite for user ${event.params.userId}:`, error);
@@ -1360,6 +1372,18 @@ exports.onStreakUpdate = onDocumentWritten("users/{userId}", async (event) => {
 
   if (!after) return;
 
+  // 🔥 NEW: Prevent infinite loops from achievement updates
+  // If this update is just from uiState or other non-streak fields, skip
+  const streakFieldsChanged = 
+    before?.currentStreak !== after?.currentStreak ||
+    before?.longestStreak !== after?.longestStreak ||
+    before?.lastRideDate !== after?.lastRideDate;
+  
+  if (!streakFieldsChanged) {
+    console.log('⏭️ Skipping - no streak fields changed');
+    return;
+  }
+
   // Check if streak fields actually changed
   const beforeStreak = before?.currentStreak || 0;
   const afterStreak = after?.currentStreak || 0;
@@ -1370,12 +1394,53 @@ exports.onStreakUpdate = onDocumentWritten("users/{userId}", async (event) => {
   const currentStreak = afterStreak;
 
   // Ride streak milestone achievements
-  if (currentStreak === 3 && beforeStreak < 3) await unlockAchievement(userId, "quick_streak");
-  if (currentStreak === 7 && beforeStreak < 7) await unlockAchievement(userId, "one_week_warrior");
-  if (currentStreak === 14 && beforeStreak < 14) await unlockAchievement(userId, "on_a_roll");
-  if (currentStreak === 30 && beforeStreak < 30) await unlockAchievement(userId, "cta_loyalist");
-  if (currentStreak === 60 && beforeStreak < 60) await unlockAchievement(userId, "unstoppable");
+  if (currentStreak === 3 && beforeStreak < 3) await unlockAchievementSafely(userId, "quick_streak");
+  if (currentStreak === 7 && beforeStreak < 7) await unlockAchievementSafely(userId, "one_week_warrior");
+  if (currentStreak === 14 && beforeStreak < 14) await unlockAchievementSafely(userId, "on_a_roll");
+  if (currentStreak === 30 && beforeStreak < 30) await unlockAchievementSafely(userId, "cta_loyalist");
+  if (currentStreak === 60 && beforeStreak < 60) await unlockAchievementSafely(userId, "unstoppable");
 });
+
+// 🔥 NEW: Safe achievement unlock that won't trigger user doc updates
+async function unlockAchievementSafely(userId, achievementId) {
+  const userRef = db.collection('users').doc(userId);
+  const achievementRef = userRef.collection('achievementsUnlocked').doc(achievementId);
+  const alreadyUnlocked = (await achievementRef.get()).exists;
+
+  if (!alreadyUnlocked) {
+    const globalRef = db.collection('achievements').doc(achievementId);
+    const globalDoc = await globalRef.get();
+    if (!globalDoc.exists) return;
+
+    const { name, description, category } = globalDoc.data();
+
+    // Only write to subcollections, not main user doc
+    const batch = db.batch();
+    
+    // Write to achievements subcollection
+    batch.set(achievementRef, {
+      unlocked: true,
+      unlockedAt: FieldValue.serverTimestamp(),
+      name,
+      description,
+      category
+    });
+
+    // Write to UI state subcollection
+    const uiStateRef = userRef.collection('uiState').doc('achievementPopup');
+    batch.set(uiStateRef, {
+      achievementId,
+      name,
+      description,
+      category,
+      shown: false,
+      unlockedAt: FieldValue.serverTimestamp()
+    });
+
+    await batch.commit();
+    console.log(`🏆 Safely unlocked ${achievementId} for ${userId}`);
+  }
+}
 
 // ---------------- SHARE ACHIEVEMENT ---------------- //
 
