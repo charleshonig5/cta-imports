@@ -15,6 +15,52 @@ admin.initializeApp();
 const db = admin.firestore();
 const storage = admin.storage();
 
+/// ---------------- RIDE VALIDATION ---------------- //
+
+function validateRide(ride) {
+  if (!ride) {
+    return { valid: false, reason: 'No ride data' };
+  }
+
+  // Skip in-progress rides - they're incomplete by design
+  if (ride.inProgress) {
+    return { valid: true };
+  }
+
+  // Check required fields for completed rides
+  const requiredFields = ['startTime', 'type', 'startStop', 'endStop'];
+  for (const field of requiredFields) {
+    if (!ride[field]) {
+      return { valid: false, reason: `Missing required field: ${field}` };
+    }
+  }
+
+  // Validate transit type
+  if (!['bus', 'train'].includes(ride.type)) {
+    return { valid: false, reason: `Invalid transit type: ${ride.type}` };
+  }
+
+  // Validate distances (you store both distanceMiles and distanceKm)
+  if (ride.distanceKm !== undefined && (typeof ride.distanceKm !== 'number' || ride.distanceKm < 0 || ride.distanceKm > 500)) {
+    return { valid: false, reason: `Invalid distanceKm: ${ride.distanceKm}` };
+  }
+
+  if (ride.distanceMiles !== undefined && (typeof ride.distanceMiles !== 'number' || ride.distanceMiles < 0 || ride.distanceMiles > 300)) {
+    return { valid: false, reason: `Invalid distanceMiles: ${ride.distanceMiles}` };
+  }
+
+  // Validate duration
+  if (ride.durationMinutes !== undefined && (typeof ride.durationMinutes !== 'number' || ride.durationMinutes < 0 || ride.durationMinutes > 300)) {
+    return { valid: false, reason: `Invalid durationMinutes: ${ride.durationMinutes}` };
+  }
+
+  if (ride.durationSeconds !== undefined && (typeof ride.durationSeconds !== 'number' || ride.durationSeconds < 0 || ride.durationSeconds > 18000)) {
+    return { valid: false, reason: `Invalid durationSeconds: ${ride.durationSeconds}` };
+  }
+
+  return { valid: true };
+}
+
 // ---------------- LEADERBOARD ---------------- //
 
 const TIME_PERIODS = ['all_time', '1w', '1m', '1y', 'ytd'];
@@ -163,13 +209,22 @@ const timePeriods = ['allTime', '1w', '1m', '1y', 'ytd'];
 exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (event) => {
   try {
     const rideSnap = event.data?.after;
-    if (!rideSnap) return;
+    if (!rideSnap || !rideSnap.exists) return;
 
-    const userId = event.params.userId;
+    const rideData = rideSnap.data();
+    const userId = event.params.userId; // FIXED: Use params instead of document field
+    const rideId = event.params.rideId;
 
-    const isManual = rideSnap.get('manualEntry');
-    const inProgress = rideSnap.get('inProgress') || false;
-    const startTime = rideSnap.get('startTime');
+    // 🔥 NEW: Validate ride data
+    const validation = validateRide(rideData);
+    if (!validation.valid) {
+      console.error(`❌ Invalid ride ${rideId} for user ${userId}: ${validation.reason}`);
+      return; // Skip processing invalid rides
+    }
+
+    const isManual = rideData.manualEntry;
+    const inProgress = rideData.inProgress || false;
+    const startTime = rideData.startTime;
 
     if (inProgress) {
       console.log(`🚧 Ride in progress, skipping stats update for now: ${userId}`);
@@ -182,28 +237,21 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
     }
     await updateRecentSelections(userId, rideSnap);
 
-    // 🔥 NEW: DEBOUNCED HEAVY PROCESSING
-    // Clear any existing timeout for this user
+    // Rest of your existing debouncing code stays the same...
     if (pendingUpdates.has(userId)) {
       clearTimeout(pendingUpdates.get(userId));
       console.log(`⏳ Clearing previous stats update for ${userId}`);
     }
 
-    // Set new timeout - wait 3 seconds for more rides
     const timeoutId = setTimeout(async () => {
       try {
         console.log(`📊 Starting debounced stats update for user: ${userId}`);
         
-        // 🚀 OPTIMIZED: Update ALL stats efficiently with single read
         await updateAllStatsAndDetailsEfficiently(userId);
-
-        // 🔥 Sync metrics field for leaderboards
-        console.log(`📊 Syncing metrics field for leaderboards: ${userId}`);
         await syncMetricsForLeaderboards(userId);
 
         console.log(`✅ Stats updated efficiently for user: ${userId}`);
         
-        // 🔥 Check achievements AFTER stats are calculated
         await checkAndUnlockAchievements(userId);
         
       } catch (error) {
@@ -211,13 +259,13 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
       } finally {
         pendingUpdates.delete(userId);
       }
-    }, 3000); // Wait 3 seconds
+    }, 3000);
 
     pendingUpdates.set(userId, timeoutId);
     console.log(`⏱️ Stats update scheduled for ${userId} in 3 seconds`);
 
   } catch (error) {
-    console.error(`❌ Error updating stats for user ${event.params.userId}:`, error);
+    console.error(`❌ Error in onRideWrite for user ${event.params.userId}:`, error);
   }
 });
 
@@ -494,268 +542,303 @@ async function updateRecentSelections(userId, rideSnap) {
 
 // Modified calculateStats to work with pre-filtered rides (no database reads!)
 function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
-  // Sort rides by time (same as original)
-  rides.sort((a, b) => {
-    const timeA = new Date(a.startTime?.toDate ? a.startTime.toDate() : a.startTime);
-    const timeB = new Date(b.startTime?.toDate ? b.startTime.toDate() : b.startTime);
-    return timeA - timeB;
-  });
-
-  let totalDistance = 0;
-  let totalTime = 0;
-  let totalRides = rides.length;
-  let totalCost = 0;
-  let co2Saved = 0;
-  const lineCounts = {};
-  let lastChargeTime = null;
-  let longestRide = null;
-
-  // Same calculation logic as your original calculateStats function
-  for (const ride of rides) {
-    const { distanceKm, durationMinutes, startTime, type, line, startStop, endStop } = ride;
-
-    // 🔥 NULL CHECK FIXES: Add || 0 defaults to prevent NaN
-    totalDistance += (distanceKm || 0);
-    totalTime += (durationMinutes || 0);
-
-    const rideStart = new Date(startTime?.toDate ? startTime.toDate() : startTime);
-    const cost = type === 'bus' ? 2.25 : 2.5;
-
-    if (!lastChargeTime || rideStart.getTime() - lastChargeTime.getTime() > 2 * 60 * 60 * 1000) {
-      totalCost += cost;
-      lastChargeTime = rideStart;
-    }
-
-    // 🔥 NULL CHECK FIX: Ensure distanceKm exists before CO2 calculation
-    co2Saved += (distanceKm || 0) * (type === 'bus' ? 0.15 : 0.2);
-
-    // 🔥 NULL CHECK FIX: Ensure distanceKm exists before longest ride comparison
-    if (!longestRide || (distanceKm || 0) > (longestRide.distanceKm || 0)) {
-      longestRide = { distanceKm: (distanceKm || 0), line, startStop, endStop };
-    }
-
-    // 🔥 NULL CHECK FIX: Only count lines that actually exist
-    if (line && line.trim()) {
-      lineCounts[line] = (lineCounts[line] || 0) + 1;
-    }
-  }
-
-  const mostUsedLineEntry = Object.entries(lineCounts).sort((a, b) => b[1] - a[1])[0];
-  const mostUsedLine = mostUsedLineEntry?.[0] || null;
-  const mostUsedLineCount = mostUsedLineEntry?.[1] || null;
-
-  const costPerMile = totalDistance > 0 ? totalCost / totalDistance : 0;
-  const totalTimeHours = Math.floor(totalTime / 60);
-  const totalTimeRemainingMinutes = totalTime % 60;
-
-  const now = new Date();
-  let averageDistancePerWeek = 0;
-  
-  // Calculate average distance per week based on time period
-  if (timePeriod !== 'allTime') {
-    let startDate;
-    switch (timePeriod) {
-      case '1w': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
-      case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
-      case '1y': startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); break;
-      case 'ytd': startDate = new Date(now.getFullYear(), 0, 1); break;
-    }
-    if (startDate) {
-      const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
-      if (durationWeeks > 0) averageDistancePerWeek = totalDistance / durationWeeks;
-    }
-  }
-
-  // Monthly change calculations (optimized to use already-filtered rides)
-  let rideCountChange = null;
-  let co2Change = null;
-
-  if (timePeriod === 'allTime') {
-    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-
-    // Filter from already-loaded rides instead of making another database query
-    const lastMonthRides = rides.filter(ride => {
-      const rideTime = new Date(ride.startTime?.toDate ? ride.startTime.toDate() : ride.startTime);
-      return rideTime >= startOfLastMonth && rideTime < startOfThisMonth &&
-             (transitType === 'all' || ride.type === transitType);
+  try {
+    // Sort rides by time (same as original)
+    rides.sort((a, b) => {
+      const timeA = new Date(a.startTime?.toDate ? a.startTime.toDate() : a.startTime);
+      const timeB = new Date(b.startTime?.toDate ? b.startTime.toDate() : b.startTime);
+      return timeA - timeB;
     });
 
-    const ridesLastMonth = lastMonthRides.length;
-    rideCountChange = totalRides - ridesLastMonth;
+    let totalDistance = 0;
+    let totalTime = 0;
+    let totalRides = rides.length;
+    let totalCost = 0;
+    let co2Saved = 0;
+    const lineCounts = {};
+    let lastChargeTime = null;
+    let longestRide = null;
 
-    // 🔥 NULL CHECK FIX: Calculate CO2 from filtered rides
-    const co2LastMonth = lastMonthRides
-      .reduce((sum, ride) => 
-        sum + (ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2), 0
-      );
+    // Same calculation logic as your original calculateStats function
+    for (const ride of rides) {
+      const { distanceKm, durationMinutes, startTime, type, line, startStop, endStop } = ride;
 
-    co2Change = co2Saved - co2LastMonth;
+      // 🔥 NULL CHECK FIXES: Add || 0 defaults to prevent NaN
+      totalDistance += (distanceKm || 0);
+      totalTime += (durationMinutes || 0);
+
+      const rideStart = new Date(startTime?.toDate ? startTime.toDate() : startTime);
+      const cost = type === 'bus' ? 2.25 : 2.5;
+
+      if (!lastChargeTime || rideStart.getTime() - lastChargeTime.getTime() > 2 * 60 * 60 * 1000) {
+        totalCost += cost;
+        lastChargeTime = rideStart;
+      }
+
+      // 🔥 NULL CHECK FIX: Ensure distanceKm exists before CO2 calculation
+      co2Saved += (distanceKm || 0) * (type === 'bus' ? 0.15 : 0.2);
+
+      // 🔥 NULL CHECK FIX: Ensure distanceKm exists before longest ride comparison
+      if (!longestRide || (distanceKm || 0) > (longestRide.distanceKm || 0)) {
+        longestRide = { distanceKm: (distanceKm || 0), line, startStop, endStop };
+      }
+
+      // 🔥 NULL CHECK FIX: Only count lines that actually exist
+      if (line && line.trim()) {
+        lineCounts[line] = (lineCounts[line] || 0) + 1;
+      }
+    }
+
+    const mostUsedLineEntry = Object.entries(lineCounts).sort((a, b) => b[1] - a[1])[0];
+    const mostUsedLine = mostUsedLineEntry?.[0] || null;
+    const mostUsedLineCount = mostUsedLineEntry?.[1] || null;
+
+    const costPerMile = totalDistance > 0 ? totalCost / totalDistance : 0;
+    const totalTimeHours = Math.floor(totalTime / 60);
+    const totalTimeRemainingMinutes = totalTime % 60;
+
+    const now = new Date();
+    let averageDistancePerWeek = 0;
+    
+    // Calculate average distance per week based on time period
+    if (timePeriod !== 'allTime') {
+      let startDate;
+      switch (timePeriod) {
+        case '1w': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
+        case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
+        case '1y': startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); break;
+        case 'ytd': startDate = new Date(now.getFullYear(), 0, 1); break;
+      }
+      if (startDate) {
+        const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
+        if (durationWeeks > 0) averageDistancePerWeek = totalDistance / durationWeeks;
+      }
+    }
+
+    // Monthly change calculations (optimized to use already-filtered rides)
+    let rideCountChange = null;
+    let co2Change = null;
+
+    if (timePeriod === 'allTime') {
+      const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+
+      // Filter from already-loaded rides instead of making another database query
+      const lastMonthRides = rides.filter(ride => {
+        const rideTime = new Date(ride.startTime?.toDate ? ride.startTime.toDate() : ride.startTime);
+        return rideTime >= startOfLastMonth && rideTime < startOfThisMonth &&
+               (transitType === 'all' || ride.type === transitType);
+      });
+
+      const ridesLastMonth = lastMonthRides.length;
+      rideCountChange = totalRides - ridesLastMonth;
+
+      // 🔥 NULL CHECK FIX: Calculate CO2 from filtered rides
+      const co2LastMonth = lastMonthRides
+        .reduce((sum, ride) => 
+          sum + (ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2), 0
+        );
+
+      co2Change = co2Saved - co2LastMonth;
+    }
+
+    const longestRideMiles = longestRide ? (longestRide.distanceKm || 0) * 0.621371 : 0;
+    const longestRideLine = longestRide?.line || null;
+    const longestRideRoute = longestRide?.startStop && longestRide?.endStop
+      ? `${longestRide.startStop} → ${longestRide.endStop}`
+      : null;
+
+    return {
+      totalDistance,
+      averageDistancePerWeek,
+      totalTimeMinutes: totalTime,
+      totalTimeHours,
+      totalTimeRemainingMinutes,
+      totalRides,
+      rideCountChange,
+      totalCost,
+      costPerMile,
+      co2Saved,
+      co2Change,
+      mostUsedLine,
+      mostUsedLineCount,
+      longestRideMiles,
+      longestRideLine,
+      longestRideRoute,
+    };
+  } catch (error) {
+    console.error(`Error calculating stats for ${userId}: ${error}`);
+    return {
+      totalDistance: 0,
+      averageDistancePerWeek: 0,
+      totalTimeMinutes: 0,
+      totalTimeHours: 0,
+      totalTimeRemainingMinutes: 0,
+      totalRides: 0,
+      rideCountChange: 0,
+      totalCost: 0,
+      costPerMile: 0,
+      co2Saved: 0,
+      co2Change: 0,
+      mostUsedLine: null,
+      mostUsedLineCount: 0,
+      longestRideMiles: 0,
+      longestRideLine: null,
+      longestRideRoute: null,
+    };
   }
-
-  const longestRideMiles = longestRide ? (longestRide.distanceKm || 0) * 0.621371 : 0;
-  const longestRideLine = longestRide?.line || null;
-  const longestRideRoute = longestRide?.startStop && longestRide?.endStop
-    ? `${longestRide.startStop} → ${longestRide.endStop}`
-    : null;
-
-  return {
-    totalDistance,
-    averageDistancePerWeek,
-    totalTimeMinutes: totalTime,
-    totalTimeHours,
-    totalTimeRemainingMinutes,
-    totalRides,
-    rideCountChange,
-    totalCost,
-    costPerMile,
-    co2Saved,
-    co2Change,
-    mostUsedLine,
-    mostUsedLineCount,
-    longestRideMiles,
-    longestRideLine,
-    longestRideRoute,
-  };
 }
 
 // Modified calculateDetailStats to work with pre-filtered rides (no database reads!)
 function calculateDetailStatsFromRides(rides, timePeriod, transitType) {
-  // Sort rides by time (same as original)
-  rides.sort((a, b) => {
-    const timeA = new Date(a.startTime?.toDate ? a.startTime.toDate() : a.startTime);
-    const timeB = new Date(b.startTime?.toDate ? b.startTime.toDate() : b.startTime);
-    return timeA - timeB;
-  });
-
-  const lineStats = {};
-  const stopVisits = {};
-  const longestRides = [];
-  let totalCost = 0;
-  let lastChargeTime = null;
-  const lineCosts = {};
-
-  // Same detailed calculation logic as your original calculateDetailStats function
-  for (const ride of rides) {
-    const {
-      line, distanceKm = 0, durationMinutes = 0, startStop, endStop,
-      startTime, type, rideId, stopCount = 0
-    } = ride;
-
-    const rideStart = new Date(startTime?.toDate ? startTime.toDate() : startTime);
-    const cost = type === 'bus' ? 2.25 : 2.5;
-
-    if (!lastChargeTime || rideStart - lastChargeTime > 2 * 60 * 60 * 1000) {
-      totalCost += cost;
-      lastChargeTime = rideStart;
-    }
-
-    // 🔥 NULL CHECK FIX: Only process rides with valid line data
-    if (!line || !line.trim()) continue;
-
-    if (!lineCosts[line]) {
-      lineCosts[line] = {
-        totalCost: 0,
-        lastChargeTime: null
-      };
-    }
-
-    if (!lineCosts[line].lastChargeTime || rideStart - lineCosts[line].lastChargeTime > 2 * 60 * 60 * 1000) {
-      lineCosts[line].totalCost += cost;
-      lineCosts[line].lastChargeTime = rideStart;
-    }
-
-    if (!lineStats[line]) {
-      lineStats[line] = {
-        totalDistanceKm: 0,
-        totalMinutes: 0,
-        rideCount: 0,
-        co2Kg: 0
-      };
-    }
-
-    // 🔥 NULL CHECK FIXES: Ensure values exist before adding
-    lineStats[line].totalDistanceKm += (distanceKm || 0);
-    lineStats[line].totalMinutes += (durationMinutes || 0);
-    lineStats[line].rideCount += 1;
-    lineStats[line].co2Kg += (distanceKm || 0) * (type === 'bus' ? 0.15 : 0.2);
-
-    if (!stopVisits[line]) stopVisits[line] = {};
-    if (startStop && startStop.trim()) {
-      stopVisits[line][startStop] = (stopVisits[line][startStop] || 0) + 1;
-    }
-    if (endStop && endStop.trim()) {
-      stopVisits[line][endStop] = (stopVisits[line][endStop] || 0) + 1;
-    }
-
-    longestRides.push({
-      rideId: rideId || null,
-      line,
-      distanceKm: (distanceKm || 0),
-      startStop,
-      endStop,
-      stopCount: (stopCount || 0)
+  try {
+    // Sort rides by time (same as original)
+    rides.sort((a, b) => {
+      const timeA = new Date(a.startTime?.toDate ? a.startTime.toDate() : a.startTime);
+      const timeB = new Date(b.startTime?.toDate ? b.startTime.toDate() : b.startTime);
+      return timeA - timeB;
     });
-  }
 
-  // Rest of the logic exactly the same as your original...
-  const topByDistance = Object.entries(lineStats)
-    .sort((a, b) => b[1].totalDistanceKm - a[1].totalDistanceKm)
-    .slice(0, 5)
-    .map(([line, data]) => ({ line, ...data }));
+    const lineStats = {};
+    const stopVisits = {};
+    const longestRides = [];
+    let totalCost = 0;
+    let lastChargeTime = null;
+    const lineCosts = {};
 
-  const topByTime = Object.entries(lineStats)
-    .sort((a, b) => b[1].totalMinutes - a[1].totalMinutes)
-    .slice(0, 5)
-    .map(([line, data]) => ({ line, totalMinutes: data.totalMinutes }));
+    // Same detailed calculation logic as your original calculateDetailStats function
+    for (const ride of rides) {
+      const {
+        line, distanceKm = 0, durationMinutes = 0, startStop, endStop,
+        startTime, type, rideId, stopCount = 0
+      } = ride;
 
-  const topByRides = Object.entries(lineStats)
-    .sort((a, b) => b[1].rideCount - a[1].rideCount)
-    .slice(0, 5)
-    .map(([line, data]) => ({ line, rideCount: data.rideCount }));
+      const rideStart = new Date(startTime?.toDate ? startTime.toDate() : startTime);
+      const cost = type === 'bus' ? 2.25 : 2.5;
 
-  const topByCO2 = Object.entries(lineStats)
-    .sort((a, b) => b[1].co2Kg - a[1].co2Kg)
-    .slice(0, 5)
-    .map(([line, data]) => ({ line, co2Kg: data.co2Kg }));
+      if (!lastChargeTime || rideStart - lastChargeTime > 2 * 60 * 60 * 1000) {
+        totalCost += cost;
+        lastChargeTime = rideStart;
+      }
 
-  const costPerLine = Object.entries(lineStats)
-    .map(([line, data]) => ({
-      line,
-      costPerMile: data.totalDistanceKm > 0 ? (lineCosts[line]?.totalCost || 0) / (data.totalDistanceKm * 0.621371) : 0
-    }))
-    .sort((a, b) => b.costPerMile - a.costPerMile)
-    .slice(0, 5);
+      // 🔥 NULL CHECK FIX: Only process rides with valid line data
+      if (!line || !line.trim()) continue;
 
-  const mostUsedLineEntry = Object.entries(lineStats)
-    .sort((a, b) => b[1].rideCount - a[1].rideCount)[0];
+      if (!lineCosts[line]) {
+        lineCosts[line] = {
+          totalCost: 0,
+          lastChargeTime: null
+        };
+      }
 
-  const mostUsedLine = mostUsedLineEntry?.[0];
-  const mostUsedLineDetails = mostUsedLine ? {
-    line: mostUsedLine,
-    longestRideStops: Math.max(...longestRides.filter(r => r.line === mostUsedLine).map(r => r.stopCount || 0)),
-    topStops: Object.entries(stopVisits[mostUsedLine] || {})
-      .sort((a, b) => b[1] - a[1])
+      if (!lineCosts[line].lastChargeTime || rideStart - lineCosts[line].lastChargeTime > 2 * 60 * 60 * 1000) {
+        lineCosts[line].totalCost += cost;
+        lineCosts[line].lastChargeTime = rideStart;
+      }
+
+      if (!lineStats[line]) {
+        lineStats[line] = {
+          totalDistanceKm: 0,
+          totalMinutes: 0,
+          rideCount: 0,
+          co2Kg: 0
+        };
+      }
+
+      // 🔥 NULL CHECK FIXES: Ensure values exist before adding
+      lineStats[line].totalDistanceKm += (distanceKm || 0);
+      lineStats[line].totalMinutes += (durationMinutes || 0);
+      lineStats[line].rideCount += 1;
+      lineStats[line].co2Kg += (distanceKm || 0) * (type === 'bus' ? 0.15 : 0.2);
+
+      if (!stopVisits[line]) stopVisits[line] = {};
+      if (startStop && startStop.trim()) {
+        stopVisits[line][startStop] = (stopVisits[line][startStop] || 0) + 1;
+      }
+      if (endStop && endStop.trim()) {
+        stopVisits[line][endStop] = (stopVisits[line][endStop] || 0) + 1;
+      }
+
+      longestRides.push({
+        rideId: rideId || null,
+        line,
+        distanceKm: (distanceKm || 0),
+        startStop,
+        endStop,
+        stopCount: (stopCount || 0)
+      });
+    }
+
+    // Rest of the logic exactly the same as your original...
+    const topByDistance = Object.entries(lineStats)
+      .sort((a, b) => b[1].totalDistanceKm - a[1].totalDistanceKm)
       .slice(0, 5)
-      .map(([stop]) => stop)
-  } : null;
+      .map(([line, data]) => ({ line, ...data }));
 
-  const longestRideList = longestRides
-    .sort((a, b) => b.distanceKm - a.distanceKm)
-    .slice(0, 5);
+    const topByTime = Object.entries(lineStats)
+      .sort((a, b) => b[1].totalMinutes - a[1].totalMinutes)
+      .slice(0, 5)
+      .map(([line, data]) => ({ line, totalMinutes: data.totalMinutes }));
 
-  return {
-    distanceTopLines: topByDistance,
-    timeTopLines: topByTime,
-    rideTopLines: topByRides,
-    co2TopLines: topByCO2,
-    costAnalysis: {
-      totalSavings: totalCost,
-      topExpensiveRoutes: costPerLine
-    },
-    mostUsedLineDetails,
-    longestRides: longestRideList
-  };
+    const topByRides = Object.entries(lineStats)
+      .sort((a, b) => b[1].rideCount - a[1].rideCount)
+      .slice(0, 5)
+      .map(([line, data]) => ({ line, rideCount: data.rideCount }));
+
+    const topByCO2 = Object.entries(lineStats)
+      .sort((a, b) => b[1].co2Kg - a[1].co2Kg)
+      .slice(0, 5)
+      .map(([line, data]) => ({ line, co2Kg: data.co2Kg }));
+
+    const costPerLine = Object.entries(lineStats)
+      .map(([line, data]) => ({
+        line,
+        costPerMile: data.totalDistanceKm > 0 ? (lineCosts[line]?.totalCost || 0) / (data.totalDistanceKm * 0.621371) : 0
+      }))
+      .sort((a, b) => b.costPerMile - a.costPerMile)
+      .slice(0, 5);
+
+    const mostUsedLineEntry = Object.entries(lineStats)
+      .sort((a, b) => b[1].rideCount - a[1].rideCount)[0];
+
+    const mostUsedLine = mostUsedLineEntry?.[0];
+    const mostUsedLineDetails = mostUsedLine ? {
+      line: mostUsedLine,
+      longestRideStops: Math.max(...longestRides.filter(r => r.line === mostUsedLine).map(r => r.stopCount || 0)),
+      topStops: Object.entries(stopVisits[mostUsedLine] || {})
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([stop]) => stop)
+    } : null;
+
+    const longestRideList = longestRides
+      .sort((a, b) => b.distanceKm - a.distanceKm)
+      .slice(0, 5);
+
+    return {
+      distanceTopLines: topByDistance,
+      timeTopLines: topByTime,
+      rideTopLines: topByRides,
+      co2TopLines: topByCO2,
+      costAnalysis: {
+        totalSavings: totalCost,
+        topExpensiveRoutes: costPerLine
+      },
+      mostUsedLineDetails,
+      longestRides: longestRideList
+    };
+  } catch (error) {
+    console.error(`Error calculating detail stats: ${error}`);
+    return {
+      distanceTopLines: [],
+      timeTopLines: [],
+      rideTopLines: [],
+      co2TopLines: [],
+      costAnalysis: { totalSavings: 0, topExpensiveRoutes: [] },
+      mostUsedLineDetails: null,
+      longestRides: []
+    };
+  }
 }
 
 // ---------------- PUSH NOTIFICATIONS ---------------- //
