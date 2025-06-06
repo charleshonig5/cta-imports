@@ -165,8 +165,7 @@ exports.onRideWrite = onDocumentWritten('users/{userId}/rides/{rideId}', async (
     const rideSnap = event.data?.after;
     if (!rideSnap) return;
 
-    const userId = rideSnap.get('userId');
-    if (!userId) return;
+    const userId = event.params.userId;
 
     const isManual = rideSnap.get('manualEntry');
     const inProgress = rideSnap.get('inProgress') || false;
