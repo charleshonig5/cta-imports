@@ -1124,69 +1124,73 @@ exports.smartRideNotificationSweep = onSchedule("every 20 minutes", async (event
 // ---------------- ESTIMATE RIDE TIME & DISTANCE ---------------- //
 
 exports.estimateRideTimeAndDistance = onCall(async (request) => {
-  const { routeId, directionId, startStopId, endStopId } = request.data;
+  const { routeId, startStopId, endStopId } = request.data;
 
-  if (!routeId || !directionId || !startStopId || !endStopId) {
+  if (!routeId || !startStopId || !endStopId) {
     throw new Error("Missing required parameters.");
   }
 
-  // Step 1: Get a valid trip for this route and direction
+  // Step 1: Get trips for this route (without direction filter)
   const tripsSnapshot = await db.collection('trips')
     .where('route_id', '==', routeId)
-    .where('direction_id', '==', directionId)
-    .limit(1)
+    .limit(10)  // Check first 10 trips to find one with both stops
     .get();
 
   if (tripsSnapshot.empty) {
-    throw new Error("No matching trip found.");
+    throw new Error("No trips found for this route.");
   }
 
-  const tripId = tripsSnapshot.docs[0].id;
+  // Step 2: Try each trip to find one containing both stops in correct order
+  for (const tripDoc of tripsSnapshot.docs) {
+    const tripId = tripDoc.id;
+    
+    // Get both stop_times for this trip
+    const stopTimesSnapshot = await db.collection('stop_times')
+      .where('trip_id', '==', tripId)
+      .where('stop_id', 'in', [startStopId, endStopId])
+      .get();
 
-  // Step 2: Get start and end stop_times by trip_id + stop_id
-  const stopTimesSnapshot = await db.collection('stop_times')
-    .where('trip_id', '==', tripId)
-    .where('stop_id', 'in', [startStopId, endStopId])
-    .get();
+    if (stopTimesSnapshot.size < 2) {
+      continue; // This trip doesn't have both stops, try next
+    }
 
-  if (stopTimesSnapshot.empty || stopTimesSnapshot.size < 2) {
-    throw new Error("Start or end stop not found in stop_times for this trip.");
+    // Step 3: Extract stop_time docs
+    const stopTimes = stopTimesSnapshot.docs.map(doc => doc.data());
+    const start = stopTimes.find(s => s.stop_id === startStopId);
+    const end = stopTimes.find(s => s.stop_id === endStopId);
+
+    if (!start || !end) {
+      continue; // Shouldn't happen, but safety check
+    }
+
+    const startSeq = parseInt(start.stop_sequence, 10);
+    const endSeq = parseInt(end.stop_sequence, 10);
+
+    if (isNaN(startSeq) || isNaN(endSeq)) {
+      continue; // Bad data, try next trip
+    }
+
+    if (startSeq >= endSeq) {
+      continue; // Wrong direction, try next trip
+    }
+
+    // Found a valid trip! Calculate time and distance
+    const arrivalStart = parseTimeToSeconds(start.arrival_time);
+    const arrivalEnd = parseTimeToSeconds(end.arrival_time);
+
+    const durationSeconds = arrivalEnd - arrivalStart;
+    const distanceKm = parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0);
+
+    if (durationSeconds > 0 && distanceKm >= 0) {
+      return {
+        durationSeconds,
+        distanceKm: Math.round(distanceKm * 1000) / 1000
+      };
+    }
   }
 
-  // Step 3: Extract stop_time docs
-  const stopTimes = stopTimesSnapshot.docs.map(doc => doc.data());
-  const start = stopTimes.find(s => s.stop_id === startStopId);
-  const end = stopTimes.find(s => s.stop_id === endStopId);
-
-  if (!start || !end) {
-    throw new Error("Could not match start or end stop from snapshot.");
-  }
-
-  const startSeq = parseInt(start.stop_sequence, 10);
-  const endSeq = parseInt(end.stop_sequence, 10);
-
-  if (isNaN(startSeq) || isNaN(endSeq)) {
-    throw new Error("Invalid stop sequence data.");
-  }
-
-  if (startSeq >= endSeq) {
-    throw new Error("End stop comes before start stop in sequence.");
-  }
-
-  const arrivalStart = parseTimeToSeconds(start.arrival_time);
-  const arrivalEnd = parseTimeToSeconds(end.arrival_time);
-
-  const durationSeconds = arrivalEnd - arrivalStart;
-  const distanceKm = parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0);
-
-  if (durationSeconds <= 0 || distanceKm < 0) {
-    throw new Error("Invalid timing or distance order.");
-  }
-
-  return {
-    durationSeconds,
-    distanceKm: Math.round(distanceKm * 1000) / 1000
-  };
+  // If we get here, no valid trip was found
+  throw new Error("Could not find a valid trip connecting these stops in the correct direction.");
 });
 
 // Helper: Convert HH:MM:SS to seconds
