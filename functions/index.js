@@ -1135,6 +1135,7 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
   // Step 1: Get trips for this route (without direction filter)
   const tripsSnapshot = await db.collection('trips')
     .where('route_id', '==', routeId)
+    .orderBy('service_id')  // ✅ ADDED: Mix of service patterns
     .limit(100)  // Increased to check more trips for better chance of finding valid route
     .get();
 
@@ -1144,68 +1145,155 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
 
   console.log(`Found ${tripsSnapshot.size} trips for route ${routeId}`);
 
-  // Step 2: Try each trip to find one containing both stops in correct order
+  // Track all valid connections we find
+  const validConnections = [];
+  let startStopFound = false;
+  let endStopFound = false;
+  let attemptedTrips = 0;
+
+  // Step 2: Try each trip to find connections
   for (const tripDoc of tripsSnapshot.docs) {
     const tripId = tripDoc.id;
+    attemptedTrips++;
     
     // Get all stop_times for this trip using document ID pattern
-    // Document IDs are formatted as {trip_id}_{stop_sequence}
     const stopTimesSnapshot = await db.collection('stop_times')
       .where(admin.firestore.FieldPath.documentId(), '>=', `${tripId}_`)
       .where(admin.firestore.FieldPath.documentId(), '<', `${tripId}~`)  // ~ comes after _ in ASCII
       .get();
 
     if (stopTimesSnapshot.empty) {
-      continue; // No stops for this trip
+      continue;
     }
+
+    // Convert to array and sort by sequence
+    const allStops = [];
+    stopTimesSnapshot.forEach(doc => {
+      const data = doc.data();
+      allStops.push({
+        ...data,
+        sequence: parseInt(data.stop_sequence, 10)
+      });
+    });
+    allStops.sort((a, b) => a.sequence - b.sequence);
+
+    // Check if this might be a loop route
+    const stopIds = allStops.map(s => s.stop_id);
+    const uniqueStops = new Set(stopIds);
+    const isLikelyLoop = stopIds.length > uniqueStops.size * 1.5; // Same stops appear multiple times
 
     // Find our specific stops
     let start = null;
     let end = null;
     
-    stopTimesSnapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.stop_id === startStopId) {
-        start = data;
+    allStops.forEach(stop => {
+      if (stop.stop_id === startStopId) {
+        start = stop;
+        startStopFound = true;
       }
-      if (data.stop_id === endStopId) {
-        end = data;
+      if (stop.stop_id === endStopId) {
+        end = stop;
+        endStopFound = true;
       }
     });
 
     if (!start || !end) {
-      continue; // This trip doesn't have both stops, try next
+      continue; // This trip doesn't have both stops
     }
 
     const startSeq = parseInt(start.stop_sequence, 10);
     const endSeq = parseInt(end.stop_sequence, 10);
 
     if (isNaN(startSeq) || isNaN(endSeq)) {
-      continue; // Bad data, try next trip
+      continue; // Bad data
     }
 
-    if (startSeq >= endSeq) {
-      continue; // Wrong direction, try next trip
-    }
-
-    // Found a valid trip! Calculate time and distance
+    // RELAXED: Calculate metrics for ANY connection (forward or backward)
     const arrivalStart = parseTimeToSeconds(start.arrival_time);
     const arrivalEnd = parseTimeToSeconds(end.arrival_time);
+    
+    let durationSeconds;
+    let distanceKm;
+    let connectionType = 'standard';
 
-    const durationSeconds = arrivalEnd - arrivalStart;
-    const distanceKm = parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0);
+    if (startSeq < endSeq) {
+      // Normal forward direction
+      durationSeconds = arrivalEnd - arrivalStart;
+      distanceKm = parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0);
+    } else {
+      // RELAXED: Handle "backwards" direction (loops, reverse rides)
+      connectionType = 'reverse';
+      
+      // For time: might need to handle day wrap-around
+      durationSeconds = arrivalEnd - arrivalStart;
+      if (durationSeconds < 0) {
+        // Assume it's next day service or loop continuation
+        durationSeconds += 24 * 60 * 60; // Add 24 hours
+      }
+      
+      // For distance on loops: calculate "around the route"
+      if (isLikelyLoop) {
+        connectionType = 'loop';
+        const totalRouteDistance = parseFloat(allStops[allStops.length - 1].shape_dist_traveled || 0);
+        const distanceToEnd = parseFloat(end.shape_dist_traveled || 0);
+        const distanceFromStart = parseFloat(start.shape_dist_traveled || 0);
+        
+        // Going backwards means: to route end + from route start to destination
+        distanceKm = (totalRouteDistance - distanceFromStart) + distanceToEnd;
+      } else {
+        // For non-loops going backwards, just use absolute difference
+        distanceKm = Math.abs(parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0));
+      }
+    }
 
-    if (durationSeconds > 0 && distanceKm >= 0) {
-      console.log(`✅ Success! Duration: ${durationSeconds}s, Distance: ${distanceKm}km`);
-      return {
+    // RELAXED: Accept any positive values
+    if (durationSeconds > 0 && distanceKm > 0) {
+      validConnections.push({
         durationSeconds,
-        distanceKm: Math.round(distanceKm * 1000) / 1000
-      };
+        distanceKm,
+        connectionType,
+        tripId,
+        startSeq,
+        endSeq
+      });
     }
   }
 
-  // If we get here, no valid trip was found
-  throw new Error("Could not find a valid trip connecting these stops in the correct direction.");
+  // RELAXED: If we found ANY valid connections, use the best one
+  if (validConnections.length > 0) {
+    // Sort by duration (shortest first)
+    validConnections.sort((a, b) => a.durationSeconds - b.durationSeconds);
+    
+    const best = validConnections[0];
+    console.log(`✅ Found ${validConnections.length} valid connections. Best: ${best.durationSeconds}s, ${best.distanceKm}km`);
+    
+    if (best.connectionType !== 'standard') {
+      console.log(`⚠️ Note: This appears to be a ${best.connectionType} route (seq ${best.startSeq} → ${best.endSeq})`);
+    }
+    
+    return {
+      durationSeconds: best.durationSeconds,
+      distanceKm: Math.round(best.distanceKm * 1000) / 1000,
+      distanceMiles: Math.round(best.distanceKm * 0.621371 * 1000) / 1000, // ✅ ADDED: Miles
+      estimationType: best.connectionType,
+      connectionsFound: validConnections.length
+    };
+  }
+
+  // RELAXED: Provide helpful error based on what we found
+  let errorMsg;
+  if (!startStopFound && !endStopFound) {
+    errorMsg = `Neither stop found on route ${routeId}. Verify stop IDs.`;
+  } else if (!startStopFound) {
+    errorMsg = `Start stop ${startStopId} not found on route ${routeId}.`;
+  } else if (!endStopFound) {
+    errorMsg = `End stop ${endStopId} not found on route ${routeId}.`;
+  } else {
+    errorMsg = `Stops found but could not calculate valid time/distance. Data may be incomplete.`;
+  }
+  
+  console.log(`❌ ${errorMsg} (Checked ${attemptedTrips} trips)`);
+  throw new Error(errorMsg);
 });
 
 // Helper: Convert HH:MM:SS to seconds
@@ -1799,8 +1887,8 @@ exports.findNearbyTransit = onCall(async (request) => {
         lat: stopLat,
         lon: stopLon,
         type: data.type || '',
-        lineId: data.lineId || '',
-        lineName: data.lineName || '',
+        lineId: data.lineId || [],      // ✅ CHANGED: Default to empty array
+        lineName: data.lineName || [],  // ✅ CHANGED: Default to empty array
         distanceMeters: distance,
       });
     }
@@ -1815,22 +1903,24 @@ exports.findNearbyTransit = onCall(async (request) => {
   nearbyStops.sort((a, b) => a.distanceMeters - b.distanceMeters);
 
   // Build set of unique lineIds among nearby stops
-  const uniqueLineIds = new Set(nearbyStops.map(stop => stop.lineId));
+  const uniqueLineIds = new Set(nearbyStops.flatMap(stop => stop.lineId)); // ✅ CHANGED: Use flatMap for arrays
 
   // Decide confidence
   let confidentLineId = null;
   let confidentLineName = null;
   let confidenceLevel = 'low';
 
-  if (uniqueLineIds.size === 1) {
-    confidentLineId = nearbyStops[0].lineId;
-    confidentLineName = nearbyStops[0].lineName;
+  // ✅ CHANGED: Check array length instead of set size
+  if (nearbyStops[0].lineId.length === 1) {
+    confidentLineId = nearbyStops[0].lineId[0];      // Get first element
+    confidentLineName = nearbyStops[0].lineName[0];  // Get first element
     confidenceLevel = 'high';
   }
 
   const bestStop = nearbyStops[0]; // closest one
 
-  console.log(`📍 Nearby stop found: ${bestStop.stopName} (${bestStop.lineName}) — Confidence: ${confidenceLevel}`);
+  // ✅ CHANGED: Handle array display in logging
+  console.log(`📍 Nearby stop found: ${bestStop.stopName} (${bestStop.lineName.join(', ')}) — Confidence: ${confidenceLevel}`);
   console.log(`📊 Queried ${geohashesToQuery.length} cells, found ${nearbyStops.length} stops within ${radiusMeters}m`);
 
   return {
@@ -1955,7 +2045,7 @@ exports.findNearbyEndStop = onCall(async (request) => {
   // 🔥 NEW: Query each geohash cell with lineId filter
   for (const hash of geohashesToQuery) {
     const snapshot = await db.collection('stops')
-      .where('lineId', '==', lineId)
+      .where('lineId', 'array-contains', lineId)  // ✅ CHANGED: '==' to 'array-contains'
       .where('geohash', '>=', hash)
       .where('geohash', '<', hash + '\uf8ff')
       .get();
