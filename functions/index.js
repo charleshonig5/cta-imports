@@ -1130,37 +1130,51 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     throw new Error("Missing required parameters.");
   }
 
+  console.log(`🔍 Estimating ride: route=${routeId}, start=${startStopId}, end=${endStopId}`);
+
   // Step 1: Get trips for this route (without direction filter)
   const tripsSnapshot = await db.collection('trips')
     .where('route_id', '==', routeId)
-    .limit(10)  // Check first 10 trips to find one with both stops
+    .limit(20)  // Increased to check more trips for better chance of finding valid route
     .get();
 
   if (tripsSnapshot.empty) {
     throw new Error("No trips found for this route.");
   }
 
+  console.log(`Found ${tripsSnapshot.size} trips for route ${routeId}`);
+
   // Step 2: Try each trip to find one containing both stops in correct order
   for (const tripDoc of tripsSnapshot.docs) {
     const tripId = tripDoc.id;
     
-    // Get both stop_times for this trip
+    // Get all stop_times for this trip using document ID pattern
+    // Document IDs are formatted as {trip_id}_{stop_sequence}
     const stopTimesSnapshot = await db.collection('stop_times')
-      .where('trip_id', '==', tripId)
-      .where('stop_id', 'in', [startStopId, endStopId])
+      .where(admin.firestore.FieldPath.documentId(), '>=', `${tripId}_`)
+      .where(admin.firestore.FieldPath.documentId(), '<', `${tripId}~`)  // ~ comes after _ in ASCII
       .get();
 
-    if (stopTimesSnapshot.size < 2) {
-      continue; // This trip doesn't have both stops, try next
+    if (stopTimesSnapshot.empty) {
+      continue; // No stops for this trip
     }
 
-    // Step 3: Extract stop_time docs
-    const stopTimes = stopTimesSnapshot.docs.map(doc => doc.data());
-    const start = stopTimes.find(s => s.stop_id === startStopId);
-    const end = stopTimes.find(s => s.stop_id === endStopId);
+    // Find our specific stops
+    let start = null;
+    let end = null;
+    
+    stopTimesSnapshot.forEach(doc => {
+      const data = doc.data();
+      if (data.stop_id === startStopId) {
+        start = data;
+      }
+      if (data.stop_id === endStopId) {
+        end = data;
+      }
+    });
 
     if (!start || !end) {
-      continue; // Shouldn't happen, but safety check
+      continue; // This trip doesn't have both stops, try next
     }
 
     const startSeq = parseInt(start.stop_sequence, 10);
@@ -1182,6 +1196,7 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     const distanceKm = parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0);
 
     if (durationSeconds > 0 && distanceKm >= 0) {
+      console.log(`✅ Success! Duration: ${durationSeconds}s, Distance: ${distanceKm}km`);
       return {
         durationSeconds,
         distanceKm: Math.round(distanceKm * 1000) / 1000
