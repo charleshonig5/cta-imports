@@ -1135,7 +1135,7 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
   // Step 1: Get trips for this route (without direction filter)
   const tripsSnapshot = await db.collection('trips')
     .where('route_id', '==', routeId)
-    .limit(20)  // Increased to check more trips for better chance of finding valid route
+    .limit(100)  // Increased to check more trips for better chance of finding valid route
     .get();
 
   if (tripsSnapshot.empty) {
