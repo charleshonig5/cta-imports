@@ -1236,54 +1236,45 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     const estimatedTimeHours = estimatedDistanceKm / averageSpeedKmh;
     const estimatedDurationSeconds = Math.round(estimatedTimeHours * 3600);
 
-    // Check for potential "wrong way" trips on linear routes
+    // Check for potential "wrong way" trips based on bearing
     let wrongWayMultiplier = 1;
     
-    // Define north-south and east-west lines for both trains and major bus routes
-    const northSouthLines = {
-      train: ['Red', 'Blue', 'Purple'],
-      bus: ['3', '4', '8', '9', '22', '36', '49', '53', '77', '79', '147', '151']
-    };
+    // Determine route orientation based on bearing
+    let routeOrientation = 'diagonal'; // default
     
-    const eastWestLines = {
-      train: ['Pink', 'Green', 'Orange'],
-      bus: ['7', '12', '18', '19', '20', '21', '49B', '50', '52', '54', '60', '63', '66', '67', '70', '72', '74', '76', '80', '82', '85', '86']
-    };
+    // Bearing ranges for different orientations:
+    // N-S: 315-45° (North) or 135-225° (South)
+    // E-W: 45-135° (East) or 225-315° (West)
     
-    // Check both trains and buses
-    const nsLines = northSouthLines[transitType] || [];
-    const ewLines = eastWestLines[transitType] || [];
+    if ((bearing >= 315 || bearing <= 45) || (bearing >= 135 && bearing <= 225)) {
+      routeOrientation = 'north-south';
+    } else if ((bearing >= 45 && bearing <= 135) || (bearing >= 225 && bearing <= 315)) {
+      routeOrientation = 'east-west';
+    }
     
-    if (nsLines.includes(routeId)) {
-      // For N-S routes, check if we're going the efficient direction
+    console.log(`📐 Route orientation detected as ${routeOrientation} (bearing: ${Math.round(bearing)}°)`);
+    
+    // Check for wrong-way travel based on orientation
+    if (routeOrientation === 'north-south') {
       const goingNorth = bearing < 90 || bearing > 270;
       const shouldGoNorth = endStop.lat > startStop.lat;
       
       if (goingNorth !== shouldGoNorth) {
-        console.log(`⚠️ Possible inefficient route detected on ${routeId} ${transitType}`);
+        console.log(`⚠️ Possible inefficient route detected`);
         console.log(`  Going ${goingNorth ? 'North' : 'South'} but destination is ${shouldGoNorth ? 'North' : 'South'}`);
-        wrongWayMultiplier = transitType === 'train' ? 2.5 : 2.0; // Buses less penalty as they can vary
+        wrongWayMultiplier = transitType === 'train' ? 2.5 : 2.0;
       }
-    } else if (ewLines.includes(routeId)) {
-      // For E-W routes, check if we're going the efficient direction
+    } else if (routeOrientation === 'east-west') {
       const goingEast = bearing > 0 && bearing < 180;
       const shouldGoEast = endStop.lon > startStop.lon;
       
       if (goingEast !== shouldGoEast) {
-        console.log(`⚠️ Possible inefficient route detected on ${routeId} ${transitType}`);
+        console.log(`⚠️ Possible inefficient route detected`);
+        console.log(`  Going ${goingEast ? 'East' : 'West'} but destination is ${shouldGoEast ? 'East' : 'West'}`);
         wrongWayMultiplier = transitType === 'train' ? 2.5 : 2.0;
       }
     }
-    
-    // Special handling for known loop routes
-    const loopRoutes = ['35', '37', '115', '119', '121', '124', '125', '130', '134', '135', '136'];
-    if (loopRoutes.includes(routeId)) {
-      // For loop routes, wrong-way could mean going 3/4 around the loop
-      if (wrongWayMultiplier > 1) {
-        wrongWayMultiplier = 3.0; // Higher penalty for loop routes
-        console.log(`🔄 Loop route ${routeId} - applying higher wrong-way penalty`);
-      }
-    }
+    // Note: Diagonal routes don't get wrong-way detection as they can be efficient in either direction
     
     // Apply wrong-way multiplier if detected
     const estimatedDurationSeconds = Math.round(estimatedTimeHours * 3600 * wrongWayMultiplier);
