@@ -10,6 +10,7 @@ const leoProfanity = require("leo-profanity");
 const customBannedUsernames = ['admin', 'moderator', 'support', 'cta', 'transitstats', 'fuck'];
 const pendingUpdates = new Map();
 const MAX_PENDING_SIZE = 1000; // Safety limit to prevent memory leaks
+const loopRouteData = require('./cta-loop-routes');
 
 
 
@@ -1167,6 +1168,55 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     const route = routeDoc.data();
     const transitType = route.type || 'bus'; // Default to bus if not specified
 
+    // CHECK FOR LOOP RIDES (same start and end stop)
+    if (startStopId === endStopId) {
+      console.log(`🔄 Loop ride detected for route ${routeId}`);
+      
+      const loopData = loopRouteData[routeId];
+      if (loopData) {
+        // Apply adjustment for stop-to-stop underestimation
+        const adjustmentFactor = transitType === 'train' ? 1.1 : 1.2;
+        const adjustedDistanceKm = loopData.totalDistanceKm * adjustmentFactor;
+        
+        // Use actual minutes if available, otherwise estimate
+        const durationMinutes = loopData.totalMinutes || Math.round((adjustedDistanceKm / (transitType === 'train' ? 32 : 19)) * 60);
+        const durationSeconds = durationMinutes * 60;
+        
+        // Add boarding buffer
+        const totalDurationSeconds = durationSeconds + 30;
+        
+        console.log(`✅ Loop estimated: ${adjustedDistanceKm}km, ${totalDurationSeconds}s (${loopData.name})`);
+        
+        return {
+          durationSeconds: totalDurationSeconds,
+          distanceKm: Math.round(adjustedDistanceKm * 1000) / 1000,
+          distanceMiles: Math.round(adjustedDistanceKm * 0.621371 * 1000) / 1000,
+          estimationType: 'loop-route',
+          directDistance: 0,
+          routeMultiplier: adjustmentFactor,
+          estimatedSpeedKmh: Math.round((adjustedDistanceKm / (durationMinutes / 60)) * 10) / 10,
+          warning: null,
+          routeName: loopData.name,
+          stopCount: loopData.stopCount
+        };
+      } else {
+        // Loop ride but no data available
+        console.warn(`⚠️ Loop ride on route ${routeId} but no loop data available`);
+        return {
+          durationSeconds: 1800, // Default 30 minutes
+          distanceKm: 0,
+          distanceMiles: 0,
+          estimationType: 'loop-unknown',
+          directDistance: 0,
+          routeMultiplier: 1,
+          estimatedSpeedKmh: 0,
+          warning: 'Loop ride detected but distance cannot be calculated. Consider manual entry.',
+          routeName: route.name
+        };
+      }
+    }
+
+    // REGULAR RIDE CALCULATION (different start and end stops)
     // Calculate haversine distance between stops
     const distanceKm = calculateHaversineDistance(
       startStop.lat,
