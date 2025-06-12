@@ -1231,10 +1231,6 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     }
     
     const estimatedDistanceKm = distanceKm * routeMultiplier;
-    
-    // Calculate time in hours, then convert to seconds
-    const estimatedTimeHours = estimatedDistanceKm / averageSpeedKmh;
-    const estimatedDurationSeconds = Math.round(estimatedTimeHours * 3600);
 
     // Check for potential "wrong way" trips based on bearing
     let wrongWayMultiplier = 1;
@@ -1276,18 +1272,25 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
     }
     // Note: Diagonal routes don't get wrong-way detection as they can be efficient in either direction
     
-    // Apply wrong-way multiplier if detected
-    const estimatedDurationSeconds = Math.round(estimatedTimeHours * 3600 * wrongWayMultiplier);
+    // Calculate time and apply multipliers
+    const estimatedTimeHours = estimatedDistanceKm / averageSpeedKmh;
+    const estimatedDurationSecondsBase = Math.round(estimatedTimeHours * 3600);
+    const estimatedDurationSeconds = Math.round(estimatedDurationSecondsBase * wrongWayMultiplier);
     const finalDistanceKm = Math.round(estimatedDistanceKm * wrongWayMultiplier * 1000) / 1000;
     
     // Add a small buffer for boarding/alighting time (30 seconds)
     const boardingBuffer = 30;
     const totalDurationSeconds = estimatedDurationSeconds + boardingBuffer;
+    
+    // Round distance to 3 decimal places for miles
+    const finalDistanceMiles = Math.round(finalDistanceKm * 0.621371 * 1000) / 1000;
+
+    console.log(`✅ Estimated: ${finalDistanceKm}km, ${totalDurationSeconds}s (${transitType} @ ${averageSpeedKmh}km/h)`);
 
     return {
       durationSeconds: totalDurationSeconds,
       distanceKm: finalDistanceKm,
-      distanceMiles: Math.round(finalDistanceKm * 0.621371 * 1000) / 1000,
+      distanceMiles: finalDistanceMiles,
       estimationType: wrongWayMultiplier > 1 ? 'haversine-wrongway' : 'haversine',
       directDistance: Math.round(distanceKm * 1000) / 1000,
       routeMultiplier: routeMultiplier * wrongWayMultiplier,
