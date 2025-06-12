@@ -1121,7 +1121,7 @@ exports.smartRideNotificationSweep = onSchedule("every 20 minutes", async (event
 });
 
 
-// ---------------- ESTIMATE RIDE TIME & DISTANCE ---------------- //
+// ---------------- SIMPLIFIED ESTIMATE RIDE TIME & DISTANCE ---------------- //
 
 exports.estimateRideTimeAndDistance = onCall(async (request) => {
   const { routeId, startStopId, endStopId } = request.data;
@@ -1132,175 +1132,228 @@ exports.estimateRideTimeAndDistance = onCall(async (request) => {
 
   console.log(`🔍 Estimating ride: route=${routeId}, start=${startStopId}, end=${endStopId}`);
 
-  // Step 1: Get trips for this route (without direction filter)
-  const tripsSnapshot = await db.collection('trips')
-    .where('route_id', '==', routeId)
-    .orderBy('service_id')  // ✅ ADDED: Mix of service patterns
-    .limit(100)  // Increased to check more trips for better chance of finding valid route
-    .get();
+  try {
+    // Get stop information
+    const [startStopDoc, endStopDoc] = await Promise.all([
+      db.collection('stops').doc(startStopId).get(),
+      db.collection('stops').doc(endStopId).get()
+    ]);
 
-  if (tripsSnapshot.empty) {
-    throw new Error("No trips found for this route.");
-  }
-
-  console.log(`Found ${tripsSnapshot.size} trips for route ${routeId}`);
-
-  // Track all valid connections we find
-  const validConnections = [];
-  let startStopFound = false;
-  let endStopFound = false;
-  let attemptedTrips = 0;
-
-  // Step 2: Try each trip to find connections
-  for (const tripDoc of tripsSnapshot.docs) {
-    const tripId = tripDoc.id;
-    attemptedTrips++;
-    
-    // Get all stop_times for this trip using document ID pattern
-    const stopTimesSnapshot = await db.collection('stop_times')
-      .where(admin.firestore.FieldPath.documentId(), '>=', `${tripId}_`)
-      .where(admin.firestore.FieldPath.documentId(), '<', `${tripId}~`)  // ~ comes after _ in ASCII
-      .get();
-
-    if (stopTimesSnapshot.empty) {
-      continue;
+    if (!startStopDoc.exists || !endStopDoc.exists) {
+      throw new Error("One or both stops not found.");
     }
 
-    // Convert to array and sort by sequence
-    const allStops = [];
-    stopTimesSnapshot.forEach(doc => {
-      const data = doc.data();
-      allStops.push({
-        ...data,
-        sequence: parseInt(data.stop_sequence, 10)
-      });
-    });
-    allStops.sort((a, b) => a.sequence - b.sequence);
+    const startStop = startStopDoc.data();
+    const endStop = endStopDoc.data();
 
-    // Check if this might be a loop route
-    const stopIds = allStops.map(s => s.stop_id);
-    const uniqueStops = new Set(stopIds);
-    const isLikelyLoop = stopIds.length > uniqueStops.size * 1.5; // Same stops appear multiple times
+    // Verify both stops serve the requested route
+    const startStopRoutes = startStop.lineId || [];
+    const endStopRoutes = endStop.lineId || [];
 
-    // Find our specific stops
-    let start = null;
-    let end = null;
-    
-    allStops.forEach(stop => {
-      if (stop.stop_id === startStopId) {
-        start = stop;
-        startStopFound = true;
-      }
-      if (stop.stop_id === endStopId) {
-        end = stop;
-        endStopFound = true;
-      }
-    });
-
-    if (!start || !end) {
-      continue; // This trip doesn't have both stops
+    if (!startStopRoutes.includes(routeId)) {
+      throw new Error(`Start stop ${startStopId} (${startStop.name}) does not serve route ${routeId}.`);
     }
 
-    const startSeq = parseInt(start.stop_sequence, 10);
-    const endSeq = parseInt(end.stop_sequence, 10);
-
-    if (isNaN(startSeq) || isNaN(endSeq)) {
-      continue; // Bad data
+    if (!endStopRoutes.includes(routeId)) {
+      throw new Error(`End stop ${endStopId} (${endStop.name}) does not serve route ${routeId}.`);
     }
 
-    // RELAXED: Calculate metrics for ANY connection (forward or backward)
-    const arrivalStart = parseTimeToSeconds(start.arrival_time);
-    const arrivalEnd = parseTimeToSeconds(end.arrival_time);
-    
-    let durationSeconds;
-    let distanceKm;
-    let connectionType = 'standard';
+    // Get route info to determine transit type
+    const routeDoc = await db.collection('lines').doc(routeId).get();
+    if (!routeDoc.exists) {
+      throw new Error(`Route ${routeId} not found.`);
+    }
 
-    if (startSeq < endSeq) {
-      // Normal forward direction
-      durationSeconds = arrivalEnd - arrivalStart;
-      distanceKm = parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0);
+    const route = routeDoc.data();
+    const transitType = route.type || 'bus'; // Default to bus if not specified
+
+    // Calculate haversine distance between stops
+    const distanceKm = calculateHaversineDistance(
+      startStop.lat,
+      startStop.lon,
+      endStop.lat,
+      endStop.lon
+    );
+
+    // Calculate bearing to understand route direction
+    const bearing = calculateBearing(
+      startStop.lat,
+      startStop.lon,
+      endStop.lat,
+      endStop.lon
+    );
+    
+    const isGridAligned = getGridAlignment(bearing);
+
+    // Apply route multiplier based on transit type and Chicago characteristics
+    let routeMultiplier;
+    let averageSpeedKmh;
+    
+    if (transitType === 'train') {
+      // CTA trains follow more direct routes with fewer turns
+      // But they still have some curves and station deviations
+      routeMultiplier = 1.15;
+      averageSpeedKmh = 32; // ~20mph including stops
     } else {
-      // RELAXED: Handle "backwards" direction (loops, reverse rides)
-      connectionType = 'reverse';
-      
-      // For time: might need to handle day wrap-around
-      durationSeconds = arrivalEnd - arrivalStart;
-      if (durationSeconds < 0) {
-        // Assume it's next day service or loop continuation
-        durationSeconds += 24 * 60 * 60; // Add 24 hours
-      }
-      
-      // For distance on loops: calculate "around the route"
-      if (isLikelyLoop) {
-        connectionType = 'loop';
-        const totalRouteDistance = parseFloat(allStops[allStops.length - 1].shape_dist_traveled || 0);
-        const distanceToEnd = parseFloat(end.shape_dist_traveled || 0);
-        const distanceFromStart = parseFloat(start.shape_dist_traveled || 0);
-        
-        // Going backwards means: to route end + from route start to destination
-        distanceKm = (totalRouteDistance - distanceFromStart) + distanceToEnd;
+      // Buses follow Chicago street grid with many 90-degree turns
+      // Base multiplier for grid-aligned routes
+      if (isGridAligned) {
+        routeMultiplier = 1.35; // Following grid = predictable turns
+        console.log(`📐 Route appears grid-aligned (bearing: ${Math.round(bearing)}°)`);
       } else {
-        // For non-loops going backwards, just use absolute difference
-        distanceKm = Math.abs(parseFloat(end.shape_dist_traveled || 0) - parseFloat(start.shape_dist_traveled || 0));
+        routeMultiplier = 1.25; // Diagonal routes are more direct
+        console.log(`📐 Route appears diagonal (bearing: ${Math.round(bearing)}°)`);
+      }
+      
+      averageSpeedKmh = 19; // ~12mph including stops and traffic
+      
+      // Adjust for distance - short trips have more turns relative to distance
+      if (distanceKm < 1) {
+        routeMultiplier *= 1.2; // Very short trips
+      } else if (distanceKm < 2) {
+        routeMultiplier *= 1.1; // Short trips
+      } else if (distanceKm > 8) {
+        routeMultiplier *= 0.95; // Long trips tend to use more direct routes
+      }
+      
+      // Check if it's a known express or limited-stop route
+      const expressRoutes = ['X', 'J', '2', '6', '14', '20', '21', '26', '28', '134', '135', '136', '143', '145', '146', '147', '148'];
+      const diagonalRoutes = ['8', '9', '11', '49', '50', '56', '59', '66', '72'];
+      
+      if (expressRoutes.some(r => routeId.includes(r))) {
+        routeMultiplier *= 0.9; // Express routes are more direct
+        averageSpeedKmh = 22; // Slightly faster
+        console.log(`🚀 Express route detected: ${routeId}`);
+      } else if (diagonalRoutes.some(r => routeId.includes(r))) {
+        routeMultiplier = 1.2; // Override - diagonal routes cut across grid efficiently
+        console.log(`↗️ Diagonal route detected: ${routeId}`);
       }
     }
+    
+    const estimatedDistanceKm = distanceKm * routeMultiplier;
+    
+    // Calculate time in hours, then convert to seconds
+    const estimatedTimeHours = estimatedDistanceKm / averageSpeedKmh;
+    const estimatedDurationSeconds = Math.round(estimatedTimeHours * 3600);
 
-    // RELAXED: Accept any positive values
-    if (durationSeconds > 0 && distanceKm > 0) {
-      validConnections.push({
-        durationSeconds,
-        distanceKm,
-        connectionType,
-        tripId,
-        startSeq,
-        endSeq
-      });
-    }
-  }
-
-  // RELAXED: If we found ANY valid connections, use the best one
-  if (validConnections.length > 0) {
-    // Sort by duration (shortest first)
-    validConnections.sort((a, b) => a.durationSeconds - b.durationSeconds);
+    // Check for potential "wrong way" trips on linear routes
+    let wrongWayMultiplier = 1;
     
-    const best = validConnections[0];
-    console.log(`✅ Found ${validConnections.length} valid connections. Best: ${best.durationSeconds}s, ${best.distanceKm}km`);
-    
-    if (best.connectionType !== 'standard') {
-      console.log(`⚠️ Note: This appears to be a ${best.connectionType} route (seq ${best.startSeq} → ${best.endSeq})`);
-    }
-    
-    return {
-      durationSeconds: best.durationSeconds,
-      distanceKm: Math.round(best.distanceKm * 1000) / 1000,
-      distanceMiles: Math.round(best.distanceKm * 0.621371 * 1000) / 1000, // ✅ ADDED: Miles
-      estimationType: best.connectionType,
-      connectionsFound: validConnections.length
+    // Define north-south and east-west lines for both trains and major bus routes
+    const northSouthLines = {
+      train: ['Red', 'Blue', 'Purple'],
+      bus: ['3', '4', '8', '9', '22', '36', '49', '53', '77', '79', '147', '151']
     };
-  }
+    
+    const eastWestLines = {
+      train: ['Pink', 'Green', 'Orange'],
+      bus: ['7', '12', '18', '19', '20', '21', '49B', '50', '52', '54', '60', '63', '66', '67', '70', '72', '74', '76', '80', '82', '85', '86']
+    };
+    
+    // Check both trains and buses
+    const nsLines = northSouthLines[transitType] || [];
+    const ewLines = eastWestLines[transitType] || [];
+    
+    if (nsLines.includes(routeId)) {
+      // For N-S routes, check if we're going the efficient direction
+      const goingNorth = bearing < 90 || bearing > 270;
+      const shouldGoNorth = endStop.lat > startStop.lat;
+      
+      if (goingNorth !== shouldGoNorth) {
+        console.log(`⚠️ Possible inefficient route detected on ${routeId} ${transitType}`);
+        console.log(`  Going ${goingNorth ? 'North' : 'South'} but destination is ${shouldGoNorth ? 'North' : 'South'}`);
+        wrongWayMultiplier = transitType === 'train' ? 2.5 : 2.0; // Buses less penalty as they can vary
+      }
+    } else if (ewLines.includes(routeId)) {
+      // For E-W routes, check if we're going the efficient direction
+      const goingEast = bearing > 0 && bearing < 180;
+      const shouldGoEast = endStop.lon > startStop.lon;
+      
+      if (goingEast !== shouldGoEast) {
+        console.log(`⚠️ Possible inefficient route detected on ${routeId} ${transitType}`);
+        wrongWayMultiplier = transitType === 'train' ? 2.5 : 2.0;
+      }
+    }
+    
+    // Special handling for known loop routes
+    const loopRoutes = ['35', '37', '115', '119', '121', '124', '125', '130', '134', '135', '136'];
+    if (loopRoutes.includes(routeId)) {
+      // For loop routes, wrong-way could mean going 3/4 around the loop
+      if (wrongWayMultiplier > 1) {
+        wrongWayMultiplier = 3.0; // Higher penalty for loop routes
+        console.log(`🔄 Loop route ${routeId} - applying higher wrong-way penalty`);
+      }
+    }
+    
+    // Apply wrong-way multiplier if detected
+    const estimatedDurationSeconds = Math.round(estimatedTimeHours * 3600 * wrongWayMultiplier);
+    const finalDistanceKm = Math.round(estimatedDistanceKm * wrongWayMultiplier * 1000) / 1000;
+    
+    // Add a small buffer for boarding/alighting time (30 seconds)
+    const boardingBuffer = 30;
+    const totalDurationSeconds = estimatedDurationSeconds + boardingBuffer;
 
-  // RELAXED: Provide helpful error based on what we found
-  let errorMsg;
-  if (!startStopFound && !endStopFound) {
-    errorMsg = `Neither stop found on route ${routeId}. Verify stop IDs.`;
-  } else if (!startStopFound) {
-    errorMsg = `Start stop ${startStopId} not found on route ${routeId}.`;
-  } else if (!endStopFound) {
-    errorMsg = `End stop ${endStopId} not found on route ${routeId}.`;
-  } else {
-    errorMsg = `Stops found but could not calculate valid time/distance. Data may be incomplete.`;
+    return {
+      durationSeconds: totalDurationSeconds,
+      distanceKm: finalDistanceKm,
+      distanceMiles: Math.round(finalDistanceKm * 0.621371 * 1000) / 1000,
+      estimationType: wrongWayMultiplier > 1 ? 'haversine-wrongway' : 'haversine',
+      directDistance: Math.round(distanceKm * 1000) / 1000,
+      routeMultiplier: routeMultiplier * wrongWayMultiplier,
+      estimatedSpeedKmh: averageSpeedKmh,
+      warning: wrongWayMultiplier > 1 ? 'This route may go the long way around' : null
+    };
+
+  } catch (error) {
+    console.error(`❌ Error estimating ride:`, error);
+    throw error;
   }
-  
-  console.log(`❌ ${errorMsg} (Checked ${attemptedTrips} trips)`);
-  throw new Error(errorMsg);
 });
 
-// Helper: Convert HH:MM:SS to seconds
-function parseTimeToSeconds(timeStr) {
-  if (!timeStr || typeof timeStr !== 'string') return 0;
-  const [hours, minutes, seconds] = timeStr.split(':').map(Number);
-  return (hours * 3600) + (minutes * 60) + (seconds || 0);
+// Helper: Calculate haversine distance between two points
+function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Earth's radius in kilometers
+  const toRad = (x) => (x * Math.PI) / 180;
+  
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  
+  const a = 
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = R * c;
+  
+  return distance;
+}
+
+// Helper: Calculate bearing between two points
+function calculateBearing(lat1, lon1, lat2, lon2) {
+  const toRad = (x) => (x * Math.PI) / 180;
+  const toDeg = (x) => (x * 180) / Math.PI;
+  
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+            Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+  
+  const bearing = toDeg(Math.atan2(y, x));
+  return (bearing + 360) % 360; // Normalize to 0-360
+}
+
+// Helper: Determine if route likely follows grid based on bearing
+function getGridAlignment(bearing) {
+  // Chicago grid is aligned N-S and E-W
+  // Check if bearing is close to cardinal directions
+  const cardinalAligned = 
+    (bearing >= 355 || bearing <= 5) ||   // North
+    (bearing >= 85 && bearing <= 95) ||   // East
+    (bearing >= 175 && bearing <= 185) || // South
+    (bearing >= 265 && bearing <= 275);   // West
+    
+  return cardinalAligned;
 }
 
 // ---------------- LIVE RIDE TRACKING FUNCTIONS ---------------- //
