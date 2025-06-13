@@ -111,7 +111,7 @@ async function processLeaderboardCategory(timePeriod, category) {
     .where(metricField, '>', 0)
     .orderBy('lastRideDate', 'desc') // Must order by first where field
     .orderBy(metricField, 'desc')     // Then by metric
-    .select('metrics', 'lastRideDate') // Only fetch needed fields
+    .select('metrics', 'lastRideDate', 'username', 'profilePhotoURL') // 🔥 CHANGED: Added username and profilePhotoURL
     .get();
 
   // 🔥 NEW: Log how many users we're processing
@@ -134,7 +134,8 @@ async function processLeaderboardCategory(timePeriod, category) {
   for (let i = 0; i < usersQuery.docs.length; i++) {
     const userDoc = usersQuery.docs[i];
     const userId = userDoc.id;
-    const metricValue = userDoc.data().metrics[`${timePeriod}_${category}`];
+    const userData = userDoc.data(); // 🔥 CHANGED: Get full user data
+    const metricValue = userData.metrics[`${timePeriod}_${category}`];
 
     // Calculate rank (handle ties) - exact same logic as before
     if (metricValue === prevValue) {
@@ -168,6 +169,8 @@ async function processLeaderboardCategory(timePeriod, category) {
         userId: userId,
         rank: currentRank,
         metricValue: metricValue,
+        username: userData.username || null,              // 🔥 CHANGED: Added username
+        profilePhotoURL: userData.profilePhotoURL || null, // 🔥 CHANGED: Added profilePhotoURL
       });
     }
 
@@ -196,7 +199,9 @@ async function processLeaderboardCategory(timePeriod, category) {
     .set({ 
       top100: leaderboardDocs,
       updatedAt: FieldValue.serverTimestamp(),
-      totalUsers: usersQuery.docs.length 
+      totalUsers: usersQuery.docs.length,
+      category,     // 🔥 CHANGED: Added category
+      timePeriod    // 🔥 CHANGED: Added timePeriod
     });
 
   console.log(`✅ Updated ${category} leaderboard for ${timePeriod}: ${usersQuery.docs.length} users processed`);
