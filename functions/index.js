@@ -2115,7 +2115,60 @@ exports.onUserCreated = onDocumentCreated("users/{userId}", async (event) => {
     }
   });
 
-  console.log(`⚙️ Initialized default settings for new user: ${userId}`);
+  // 🔥 NEW: Initialize all stats documents with zeros
+  const batch = db.batch();
+  const timePeriods = ['allTime', '1w', '1m', '1y', 'ytd'];
+  const transitTypes = ['all', 'bus', 'train'];
+  
+  for (const timePeriod of timePeriods) {
+    for (const transitType of transitTypes) {
+      const statsRef = userRef.collection('stats').doc(`${timePeriod}_${transitType}`);
+      const detailStatsRef = userRef.collection('detailStats').doc(`${timePeriod}_${transitType}`);
+      
+      // Initialize main stats
+      batch.set(statsRef, {
+        totalDistance: 0,
+        averageDistancePerWeek: 0,
+        totalTimeMinutes: 0,
+        totalTimeHours: 0,
+        totalTimeRemainingMinutes: 0,
+        totalRides: 0,
+        rideCountChange: 0,
+        totalCost: 0,
+        costPerMile: 0,
+        co2Saved: 0,
+        co2Change: 0,
+        mostUsedLine: null,
+        mostUsedLineCount: 0,
+        longestRideMiles: 0,
+        longestRideLine: null,
+        longestRideRoute: null,
+        timePeriod,
+        transitType,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      
+      // Initialize detail stats
+      batch.set(detailStatsRef, {
+        distanceTopLines: [],
+        timeTopLines: [],
+        rideTopLines: [],
+        co2TopLines: [],
+        costAnalysis: {
+          totalSavings: 0,
+          topExpensiveRoutes: []
+        },
+        mostUsedLineDetails: null,
+        longestRides: [],
+        timePeriod,
+        transitType,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+  }
+  
+  await batch.commit();
+  console.log(`⚙️ Initialized default settings and stats for new user: ${userId}`);
 });
 
 // 🔥 ADD THIS RIGHT AFTER onUserCreated
