@@ -842,7 +842,8 @@ function calculateDetailStatsFromRides(rides, timePeriod, transitType) {
           totalDistanceKm: 0,
           totalMinutes: 0,
           rideCount: 0,
-          co2Kg: 0
+          co2Kg: 0,
+          type: type // 🔥 CHANGE #1: Add type to lineStats
         };
       }
 
@@ -866,7 +867,9 @@ function calculateDetailStatsFromRides(rides, timePeriod, transitType) {
         distanceKm: (distanceKm || 0),
         startStop,
         endStop,
-        stopCount: (stopCount || 0)
+        stopCount: (stopCount || 0),
+        type: type, // 🔥 CHANGE #4: Add type to longestRides
+        startTime: rideStart // 🔥 CHANGE #5: Add startTime to longestRides
       });
     }
 
@@ -874,27 +877,40 @@ function calculateDetailStatsFromRides(rides, timePeriod, transitType) {
     const topByDistance = Object.entries(lineStats)
       .sort((a, b) => b[1].totalDistanceKm - a[1].totalDistanceKm)
       .slice(0, 5)
-      .map(([line, data]) => ({ line, ...data }));
+      .map(([line, data]) => ({ line, ...data })); // 🔥 CHANGE #2: type is included via spread
 
     const topByTime = Object.entries(lineStats)
       .sort((a, b) => b[1].totalMinutes - a[1].totalMinutes)
       .slice(0, 5)
-      .map(([line, data]) => ({ line, totalMinutes: data.totalMinutes }));
+      .map(([line, data]) => ({ 
+        line, 
+        totalMinutes: data.totalMinutes,
+        type: data.type // 🔥 CHANGE #2: Include type
+      }));
 
     const topByRides = Object.entries(lineStats)
       .sort((a, b) => b[1].rideCount - a[1].rideCount)
       .slice(0, 5)
-      .map(([line, data]) => ({ line, rideCount: data.rideCount }));
+      .map(([line, data]) => ({ 
+        line, 
+        rideCount: data.rideCount,
+        type: data.type // 🔥 CHANGE #2: Include type
+      }));
 
     const topByCO2 = Object.entries(lineStats)
       .sort((a, b) => b[1].co2Kg - a[1].co2Kg)
       .slice(0, 5)
-      .map(([line, data]) => ({ line, co2Kg: data.co2Kg }));
+      .map(([line, data]) => ({ 
+        line, 
+        co2Kg: data.co2Kg,
+        type: data.type // 🔥 CHANGE #2: Include type
+      }));
 
     const costPerLine = Object.entries(lineStats)
       .map(([line, data]) => ({
         line,
-        costPerMile: data.totalDistanceKm > 0 ? (lineCosts[line]?.totalCost || 0) / (data.totalDistanceKm * 0.621371) : 0
+        costPerMile: data.totalDistanceKm > 0 ? (lineCosts[line]?.totalCost || 0) / (data.totalDistanceKm * 0.621371) : 0,
+        type: data.type // 🔥 CHANGE #2: Include type
       }))
       .sort((a, b) => b.costPerMile - a.costPerMile)
       .slice(0, 5);
@@ -909,7 +925,7 @@ function calculateDetailStatsFromRides(rides, timePeriod, transitType) {
       topStops: Object.entries(stopVisits[mostUsedLine] || {})
         .sort((a, b) => b[1] - a[1])
         .slice(0, 5)
-        .map(([stop]) => stop)
+        .map(([stop, count]) => ({ stop, visitCount: count })) // 🔥 CHANGE #3: Return objects with visitCount
     } : null;
 
     const longestRideList = longestRides
