@@ -751,7 +751,7 @@ function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
 
     co2Change = co2Saved - co2LastMonth;
 
-    const longestRideMiles = longestRide ? (longestRide.distanceKm || 0) * 0.621371 : 0;
+    const longestRideMiles = longestRide ? (longestRide.distanceKm || 0) : 0;  // 🔥 FIX: Store in km despite the name
     const longestRideLine = longestRide?.line || null;
     const longestRideRoute = longestRide?.startStop && longestRide?.endStop
       ? `${longestRide.startStop} → ${longestRide.endStop}`
@@ -771,7 +771,7 @@ function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
       co2Change,
       mostUsedLine,
       mostUsedLineCount,
-      longestRideMiles,
+      longestRideMiles,  // Still named 'Miles' but now stores km like totalDistance
       longestRideLine,
       longestRideRoute,
     };
@@ -791,7 +791,7 @@ function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
       co2Change: 0,
       mostUsedLine: null,
       mostUsedLineCount: 0,
-      longestRideMiles: 0,
+      longestRideMiles: 0,  // Now stores km despite the name
       longestRideLine: null,
       longestRideRoute: null,
     };
