@@ -707,18 +707,22 @@ function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
     let averageDistancePerWeek = 0;
     
     // Calculate average distance per week based on time period
-    if (timePeriod !== 'allTime') {
-      let startDate;
+    let startDate;
+    if (timePeriod === 'allTime' && rides.length > 0) {
+      // 🔥 FIX: For all time, use the date of the first ride
+      startDate = new Date(rides[0].startTime?.toDate ? rides[0].startTime.toDate() : rides[0].startTime);
+    } else if (timePeriod !== 'allTime') {
       switch (timePeriod) {
         case '1w': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
         case '1m': startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
         case '1y': startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()); break;
         case 'ytd': startDate = new Date(now.getFullYear(), 0, 1); break;
       }
-      if (startDate) {
-        const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
-        averageDistancePerWeek = safeDivide(totalDistance, durationWeeks, 0);
-      }
+    }
+    
+    if (startDate) {
+      const durationWeeks = (now - startDate) / (7 * 24 * 60 * 60 * 1000);
+      averageDistancePerWeek = safeDivide(totalDistance, durationWeeks, 0);
     }
 
     // Monthly change calculations (optimized to use already-filtered rides)
