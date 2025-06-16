@@ -729,28 +729,27 @@ function calculateStatsFromRides(rides, userId, timePeriod, transitType) {
     let rideCountChange = null;
     let co2Change = null;
 
-    if (timePeriod === 'allTime') {
-      const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-      const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    // 🔥 FIX: Calculate monthly changes for ALL time periods, not just 'allTime'
+    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
-      // Filter from already-loaded rides instead of making another database query
-      const lastMonthRides = rides.filter(ride => {
-        const rideTime = new Date(ride.startTime?.toDate ? ride.startTime.toDate() : ride.startTime);
-        return rideTime >= startOfLastMonth && rideTime < startOfThisMonth &&
-               (transitType === 'all' || ride.type === transitType);
-      });
+    // Filter from already-loaded rides instead of making another database query
+    const lastMonthRides = rides.filter(ride => {
+      const rideTime = new Date(ride.startTime?.toDate ? ride.startTime.toDate() : ride.startTime);
+      return rideTime >= startOfLastMonth && rideTime < startOfThisMonth &&
+             (transitType === 'all' || ride.type === transitType);
+    });
 
-      const ridesLastMonth = lastMonthRides.length;
-      rideCountChange = totalRides - ridesLastMonth;
+    const ridesLastMonth = lastMonthRides.length;
+    rideCountChange = totalRides - ridesLastMonth;
 
-      // 🔥 NULL CHECK FIX: Calculate CO2 from filtered rides
-      const co2LastMonth = lastMonthRides
-        .reduce((sum, ride) => 
-          sum + (ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2), 0
-        );
+    // 🔥 NULL CHECK FIX: Calculate CO2 from filtered rides
+    const co2LastMonth = lastMonthRides
+      .reduce((sum, ride) => 
+        sum + (ride.distanceKm || 0) * (ride.type === 'bus' ? 0.15 : 0.2), 0
+      );
 
-      co2Change = co2Saved - co2LastMonth;
-    }
+    co2Change = co2Saved - co2LastMonth;
 
     const longestRideMiles = longestRide ? (longestRide.distanceKm || 0) * 0.621371 : 0;
     const longestRideLine = longestRide?.line || null;
